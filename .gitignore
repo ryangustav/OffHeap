@@ -23,3 +23,7 @@ temp/
 **/cache/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# NAPI-RS auto-generated bindings
+binding.js
+binding.d.ts

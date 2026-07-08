@@ -41,6 +41,10 @@ const message = cache.get('text_data'); // Returns a standard JS string
 // 3. Structured JSON (objects, arrays, numbers, booleans)
 cache.set('json_data', { username: 'ryangustavo', role: 'admin' });
 const profile = cache.get('json_data'); // Returns the deserialized JS Object
+
+// 4. Atomic Counters (high-efficiency integer values)
+cache.set('page_views', 100);
+cache.increment('page_views', 1); // Returns 101 without JSON overhead
 ```
 
 ## Introduction

@@ -137,6 +137,8 @@ impl TinyLfuListMetadata {
 
 pub struct TinyLfuCache {
     capacity: usize,
+    max_bytes: Option<usize>,
+    bytes_used: usize,
     map: HashMap<String, usize>,
     nodes: Vec<TinyLfuNode>,
     free_nodes: Vec<usize>,
@@ -152,11 +154,10 @@ pub struct TinyLfuCache {
 
 impl TinyLfuCache {
     pub fn new(capacity: usize) -> Self {
-        // Segment capacities:
-        // Window: 1% (min 1)
-        // Main: 99%
-        //   Probation: 20% of Main (min 1 if Main capacity > 0)
-        //   Protected: 80% of Main
+        Self::new_with_max_bytes(capacity, None)
+    }
+
+    pub fn new_with_max_bytes(capacity: usize, max_bytes: Option<usize>) -> Self {
         let window_cap = (capacity / 100).max(1);
         let main_cap = capacity.saturating_sub(window_cap);
 
@@ -170,6 +171,8 @@ impl TinyLfuCache {
 
         Self {
             capacity,
+            max_bytes,
+            bytes_used: 0,
             map: HashMap::with_capacity(capacity),
             nodes: Vec::with_capacity(capacity),
             free_nodes: Vec::new(),
@@ -180,6 +183,11 @@ impl TinyLfuCache {
             hits: 0,
             misses: 0,
         }
+    }
+
+    fn node_bytes(&self, idx: usize) -> usize {
+        let node = &self.nodes[idx];
+        node.key.len() + node.entry.value.len()
     }
 
     fn detach(&mut self, idx: usize) {
@@ -232,6 +240,8 @@ impl TinyLfuCache {
     }
 
     fn remove_completely(&mut self, idx: usize) -> String {
+        let bytes = self.node_bytes(idx);
+        self.bytes_used -= bytes;
         self.detach(idx);
         self.free_nodes.push(idx);
         let key = std::mem::take(&mut self.nodes[idx].key);
@@ -246,8 +256,8 @@ impl CacheImpl for TinyLfuCache {
 
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                self.remove_completely(idx);
-                self.map.remove(key);
+                let evicted_key = self.remove_completely(idx);
+                self.map.remove(&evicted_key);
                 self.misses += 1;
                 None
             } else {
@@ -258,11 +268,9 @@ impl CacheImpl for TinyLfuCache {
                         self.attach_to_head(idx, TinyLfuList::Window);
                     }
                     TinyLfuList::Probation => {
-                        // Promote to Protected segment
                         self.detach(idx);
                         self.attach_to_head(idx, TinyLfuList::Protected);
 
-                        // Handle potential overflow of Protected segment
                         if self.protected.len > self.protected.capacity {
                             if let Some(prot_tail) = self.protected.tail {
                                 self.detach(prot_tail);
@@ -284,17 +292,49 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
+    fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
+        if let Some(&idx) = self.map.get(key) {
+            if self.nodes[idx].entry.is_expired() {
+                let evicted_key = self.remove_completely(idx);
+                self.map.remove(&evicted_key);
+                self.misses += 1;
+                None
+            } else {
+                self.hits += 1;
+                Some(self.nodes[idx].entry.value.clone())
+            }
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    fn has(&mut self, key: &str) -> bool {
+        if let Some(&idx) = self.map.get(key) {
+            if self.nodes[idx].entry.is_expired() {
+                let evicted_key = self.remove_completely(idx);
+                self.map.remove(&evicted_key);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
+
     fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
         self.sketch.increment(key);
 
-        if let Some(&idx) = self.map.get(key) {
-            // Key exists. Update value.
-            let old_value = std::mem::replace(
-                &mut self.nodes[idx].entry,
-                CacheEntry::new(value, ttl_ms),
-            ).value;
+        let new_entry = CacheEntry::new(value, ttl_ms);
+        let new_bytes = key.len() + new_entry.value.len();
+        let mut old_value = None;
 
-            // Perform promotion/MRU updates identical to `get`
+        if let Some(&idx) = self.map.get(key) {
+            let old_bytes = self.node_bytes(idx);
+            old_value = Some(std::mem::replace(&mut self.nodes[idx].entry, new_entry).value);
+            self.bytes_used = self.bytes_used + new_bytes - old_bytes;
+
             let list = self.nodes[idx].list;
             match list {
                 TinyLfuList::Window => {
@@ -317,23 +357,20 @@ impl CacheImpl for TinyLfuCache {
                     self.attach_to_head(idx, TinyLfuList::Protected);
                 }
             }
-            Some(old_value)
         } else {
-            // Check if we have capacity at all
             if self.capacity == 0 {
                 return None;
             }
 
-            // Create new node inside Window segment
             let new_idx = if let Some(free_idx) = self.free_nodes.pop() {
                 self.nodes[free_idx].key = key.to_string();
-                self.nodes[free_idx].entry = CacheEntry::new(value, ttl_ms);
+                self.nodes[free_idx].entry = new_entry;
                 free_idx
             } else {
                 let free_idx = self.nodes.len();
                 self.nodes.push(TinyLfuNode {
                     key: key.to_string(),
-                    entry: CacheEntry::new(value, ttl_ms),
+                    entry: new_entry,
                     list: TinyLfuList::Window,
                     prev: None,
                     next: None,
@@ -341,13 +378,12 @@ impl CacheImpl for TinyLfuCache {
                 free_idx
             };
 
+            self.bytes_used += new_bytes;
             self.attach_to_head(new_idx, TinyLfuList::Window);
             self.map.insert(key.to_string(), new_idx);
 
-            // If Window segment overflows
             if self.window.len > self.window.capacity {
                 if let Some(win_tail) = self.window.tail {
-                    // Candidate to move to Main cache (Probation segment)
                     let candidate_idx = win_tail;
                     self.detach(candidate_idx);
 
@@ -355,10 +391,8 @@ impl CacheImpl for TinyLfuCache {
                     if main_has_capacity {
                         let total_size = self.window.len + self.probation.len + self.protected.len;
                         if total_size + 1 <= self.capacity {
-                            // Cache is not full yet. Admit candidate directly.
                             self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                         } else {
-                            // Cache is full. Compare candidate and victim.
                             if let Some(prob_tail) = self.probation.tail {
                                 let victim_idx = prob_tail;
 
@@ -369,29 +403,60 @@ impl CacheImpl for TinyLfuCache {
                                 let victim_freq = self.sketch.estimate(victim_key);
 
                                 if candidate_freq > victim_freq {
-                                    // Candidate wins! Evict victim, admit candidate.
                                     let evicted_key = self.remove_completely(victim_idx);
                                     self.map.remove(&evicted_key);
                                     self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                                 } else {
-                                    // Candidate loses! Evict candidate, keep victim.
                                     let evicted_key = self.remove_completely(candidate_idx);
                                     self.map.remove(&evicted_key);
                                 }
                             } else {
-                                // Fallback if no victim (should not happen if len == capacity > 0)
                                 self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                             }
                         }
                     } else {
-                        // Main Cache capacity is 0 (capacity == 1 edge case).
-                        // Candidate is evicted directly.
                         let evicted_key = self.remove_completely(candidate_idx);
                         self.map.remove(&evicted_key);
                     }
                 }
             }
-            None
+        }
+
+        if let Some(max) = self.max_bytes {
+            while self.bytes_used > max && (self.probation.len > 0 || self.window.len > 0) {
+                if let Some(prob_tail) = self.probation.tail {
+                    let evicted_key = self.remove_completely(prob_tail);
+                    self.map.remove(&evicted_key);
+                } else if let Some(win_tail) = self.window.tail {
+                    let evicted_key = self.remove_completely(win_tail);
+                    self.map.remove(&evicted_key);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        old_value
+    }
+
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
+        if let Some(&idx) = self.map.get(key) {
+            if self.nodes[idx].entry.is_expired() {
+                let evicted_key = self.remove_completely(idx);
+                self.map.remove(&evicted_key);
+                false
+            } else {
+                self.nodes[idx].entry = CacheEntry::new(
+                    self.nodes[idx].entry.value.clone(),
+                    ttl_ms,
+                );
+                let list = self.nodes[idx].list;
+                self.detach(idx);
+                self.attach_to_head(idx, list);
+                true
+            }
+        } else {
+            false
         }
     }
 
@@ -420,10 +485,9 @@ impl CacheImpl for TinyLfuCache {
         self.protected.len = 0;
         self.hits = 0;
         self.misses = 0;
-        // FrequencySketch is not cleared completely, but can be decay'd or just left as is.
-        // Actually, clearing table is cleaner:
         self.sketch.table.fill(0);
         self.sketch.additions = 0;
+        self.bytes_used = 0;
     }
 
     fn stats(&self) -> CacheStats {
@@ -432,12 +496,12 @@ impl CacheImpl for TinyLfuCache {
             misses: self.misses,
             capacity: self.capacity,
             size: self.window.len + self.probation.len + self.protected.len,
+            bytes_used: self.bytes_used,
         }
     }
 
     fn keys(&self) -> Vec<String> {
         let mut result = Vec::new();
-        // Return window keys
         let mut curr = self.window.head;
         while let Some(idx) = curr {
             let node = &self.nodes[idx];
@@ -446,7 +510,6 @@ impl CacheImpl for TinyLfuCache {
             }
             curr = node.next;
         }
-        // Return probation keys
         let mut curr = self.probation.head;
         while let Some(idx) = curr {
             let node = &self.nodes[idx];
@@ -455,7 +518,6 @@ impl CacheImpl for TinyLfuCache {
             }
             curr = node.next;
         }
-        // Return protected keys
         let mut curr = self.protected.head;
         while let Some(idx) = curr {
             let node = &self.nodes[idx];
@@ -467,6 +529,7 @@ impl CacheImpl for TinyLfuCache {
         result
     }
 }
+
 
 #[cfg(test)]
 mod tests {
