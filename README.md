@@ -49,6 +49,10 @@ Storing data off-heap introduces different memory layouts depending on your payl
 *   **OffHeap L2 Delta RSS**: **359.75 MB** (**20% memory reduction!**)
 *   *Why?* Unique `Buffer` objects in JavaScript carry massive JS wrapper object overhead (~100 bytes per buffer wrapper) and alignment tracking. OffHeap copies contiguous raw bytes directly into native memory via `mimalloc`, avoiding V8 wrapper overhead entirely.
 
+#### C. How to Achieve Memory Savings Today
+To minimize the memory footprint of JSON objects off-heap, **serialize them to binary Buffers (e.g., using MessagePack or Protocol Buffers) before calling `set`**. This strips repeated schema keys and allows OffHeap to store raw bytes directly, achieving the **20% physical memory reduction** demonstrated in the Buffer benchmark.
+
+
 ---
 
 ## 📚 Academic Foundations & Architecture
