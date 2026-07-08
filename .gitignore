@@ -17,3 +17,9 @@ Cargo.lock
 # Temporary directories
 temp/
 .gemini/
+
+# VitePress cache and output
+**/dist/
+**/cache/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
