@@ -148,10 +148,11 @@ class Cache {
     }
 
     if (missing.length > 0) {
-      const nativeRes = this._native.mget(missing);
-      for (const key of missing) {
-        const val = unwrapValue(nativeRes[key]);
+      const nativeValues = this._native.mget(missing);
+      for (let i = 0; i < missing.length; i++) {
+        const val = unwrapValue(nativeValues[i]);
         if (val !== undefined) {
+          const key = missing[i];
           result[key] = val;
           this._l1Set(key, val);
         }

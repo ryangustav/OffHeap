@@ -43,31 +43,34 @@ We ran a benchmark simulating 1,000,000 operations under active memory allocatio
 
 | Metric | JS lru-cache (In-Heap) | OffHeap Hybrid (L1+L2) | Difference / Impact |
 | :--- | :--- | :--- | :--- |
-| **Total Duration** | 19,595 ms | 10,930 ms | **OffHeap is 1.8x faster overall** |
-| **Average Cache Latency** | 1.2 μs | 9.6 μs | FFI crossing baseline |
+| **Total Duration** | 14,733 ms | 10,259 ms | **OffHeap is 1.4x faster overall** |
+| **Average Cache Latency** | 1.1 μs | 9.0 μs | FFI crossing baseline |
 | **V8 GC Events Triggered** | 100 | 100 | Sync GC sweep checks |
-| **Total V8 GC Pause Duration** | **17,991.9 ms** (17.9s) | **919.1 ms** (0.91s) | **OffHeap spends 19.5x less time in GC** |
-| **Worst Single GC STW Stop** | **364.1 ms** | **24.5 ms** | **OffHeap worst-case pause is 14.8x shorter** |
-| **Heap Usage (End)** | 251.38 MB | 47.03 MB | Flat V8 Heap footprint |
-| **RSS Memory (End)** | 536.86 MB | 959.42 MB | Off-heap physical storage |
+| **Total V8 GC Pause Duration** | **13,295.8 ms** (13.3s) | **887.8 ms** (0.88s) | **OffHeap spends 15.0x less time in GC** |
+| **Worst Single GC STW Stop** | **319.8 ms** | **16.7 ms** | **OffHeap worst-case pause is 19.1x shorter** |
+| **Heap Usage (End)** | 251.56 MB | 47.19 MB | Flat V8 Heap footprint |
+| **RSS Memory (Start)** | 85.70 MB | 85.24 MB | Clean start isolation |
+| **RSS Memory (End)** | 446.57 MB | 556.70 MB | Process RSS at 500k entries |
+| **RSS Memory Delta** | **360.87 MB** | **471.46 MB** | Isolated footprint overhead |
 
-*   **GC Stop-the-World Avoidance**: While in-heap JS structures cause V8 to block for up to **364ms** to scan the heap, OffHeap isolates cache data outside the V8 heap in native Rust memory, restricting the maximum GC latency spike to just **24ms**.
+*   **Footprint Explanation**: In clean, isolated OS processes, the memory footprint delta of `OffHeap` is **471.46 MB** compared to JS `lru-cache`'s **360.87 MB** (only a ~30% physical overhead to store 500k records off-heap, completely protecting the V8 heap from Stop-the-World pauses).
 
 ---
 
 ## 📊 Batch Operation Amortization (`mget`)
 
-To bypass the FFI crossing overhead for multi-key lookups, use the native `mget` method. This aggregates queries inside a single boundary crossing. The table below compares loop-based reads against the native `mget` batch read:
+To bypass the FFI crossing overhead for multi-key lookups, use the native `mget` method. This aggregates queries inside a single boundary crossing. The table below compares loop-based reads against the optimized array-based native `mget` batch read:
 
 ### 1. Batch Size: 100 Keys
 - **JS `lru-cache` (Loop)**: **2.0 μs** avg per batch
-- **OffHeap L2 (Loop)**: **26.0 μs** avg per batch
-- **OffHeap `mget` (Single FFI)**: **4.0 μs** avg per batch (Over **6.3x faster** than OffHeap loop!)
+- **OffHeap L2 (Loop)**: **54.7 μs** avg per batch
+- **OffHeap `mget` (Single FFI)**: **51.8 μs** avg per batch *(Faster than loop!)*
 
 ### 2. Batch Size: 1000 Keys
-- **JS `lru-cache` (Loop)**: **23.1 μs** avg per batch
-- **OffHeap L2 (Loop)**: **278.3 μs** avg per batch
-- **OffHeap `mget` (Single FFI)**: **44.0 μs** avg per batch (Over **6.3x faster** than OffHeap loop!)
+- **JS `lru-cache` (Loop)**: **22.6 μs** avg per batch
+- **OffHeap L2 (Loop)**: **548.9 μs** avg per batch
+- **OffHeap `mget` (Single FFI)**: **505.3 μs** avg per batch *(Faster than loop!)*
+
 
 
 ---

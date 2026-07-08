@@ -315,8 +315,8 @@ impl Cache {
     }
 
     #[napi]
-    pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<JsObject> {
-        let mut result_obj = env.create_object()?;
+    pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<Vec<JsUnknown>> {
+        let mut result = Vec::with_capacity(keys.len());
         for key in keys {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
@@ -324,10 +324,12 @@ impl Cache {
             
             if let Some(bytes) = cache.get(&key) {
                 let val = self.deserialize_value(env, bytes)?;
-                result_obj.set(&key, val)?;
+                result.push(val);
+            } else {
+                result.push(env.get_undefined()?.into_unknown());
             }
         }
-        Ok(result_obj)
+        Ok(result)
     }
 
     #[napi]
