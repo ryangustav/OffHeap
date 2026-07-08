@@ -315,3 +315,67 @@ test('Cache - Three-layered Config & Overrides', () => {
   cache2.dispose();
   manager.dispose();
 });
+
+test('Cache - Advanced Compression Matrices, Inheritances, Boundaries & Safety', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 100 },
+    eviction: { policy: 'lru', capacity: 100 }
+  });
+
+  const cache = manager.createCache('compat-advanced');
+
+  const createJsonOfSize = (size) => {
+    // base structure: {"d":""} is 8 bytes
+    const padLength = size - 8;
+    return { d: 'a'.repeat(padLength) };
+  };
+
+  const obj99 = createJsonOfSize(99);
+  const obj100 = createJsonOfSize(100);
+  const obj101 = createJsonOfSize(101);
+
+  cache.set('key99', obj99);
+  cache.set('key100', obj100);
+  cache.set('key101', obj101);
+
+  assert.deepStrictEqual(cache.get('key99'), obj99);
+  assert.deepStrictEqual(cache.get('key100'), obj100);
+  assert.deepStrictEqual(cache.get('key101'), obj101);
+
+  // Mixed compression mget batch test
+  const batchRes = cache.mget(['key99', 'key100', 'key101']);
+  assert.deepStrictEqual(batchRes, {
+    key99: obj99,
+    key100: obj100,
+    key101: obj101
+  });
+
+  // Unknown tag compatibility / safety
+  assert.throws(() => {
+    cache._native.testDeserializeRaw([99, 1, 2, 3]);
+  }, /Invalid data type tag in cache storage/);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache - Read/Write Config Change Isolation', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 10 },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache = manager.createCache('change-isolation-cache');
+  const payload = { test: 'value_to_compress' };
+
+  cache.set('item', payload);
+
+  // Dynamically disable compression
+  cache._config.compression.enabled = false;
+
+  // Reading must still deserialize correctly because Tag 5 is self-describing
+  assert.deepStrictEqual(cache.get('item'), payload);
+
+  cache.dispose();
+  manager.dispose();
+});

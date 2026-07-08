@@ -64,6 +64,23 @@ impl Cache {
         Ok(Arc::clone(&self.shards[idx]))
     }
 
+    /// ========================================================================
+    /// 📂 SERIALIZATION TAG REGISTRY
+    /// ========================================================================
+    /// Every entry written off-heap is prefixed with a 1-byte protocol header
+    /// (Tag) that determines how the trailing slice payload is deserialized:
+    ///
+    ///   Tag 1: Raw Binary Buffer (Stored contiguously in native memory)
+    ///   Tag 2: Raw UTF-8 String (Decoded directly into v8::String)
+    ///   Tag 3: Raw JSON String (Raw text JSON representation of JS objects)
+    ///   Tag 4: Atomic Counter (64-bit signed integer representation)
+    ///   Tag 5: LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///
+    /// When expanding types (e.g., Tag 6 for MsgPack, Tag 7 for Zstd):
+    ///   1. Register the tag code here.
+    ///   2. Handle serialization tag routing in `serialize_value`.
+    ///   3. Implement safety catches for new tags in `deserialize_value`.
+    /// ========================================================================
     fn serialize_value(&self, _env: Env, value: JsUnknown, force_compression: Option<bool>) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let value_type = value.get_type()?;
@@ -395,5 +412,10 @@ impl Cache {
             }
         }
         Ok(count)
+    }
+
+    #[napi]
+    pub fn test_deserialize_raw(&self, env: Env, bytes: Vec<u8>) -> Result<JsUnknown> {
+        self.deserialize_value(env, bytes)
     }
 }

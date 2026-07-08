@@ -174,11 +174,11 @@ class Cache {
     // Determine if we should compress this payload based on type and size threshold
     let forceCompression = undefined;
     if (typeof wrapped === 'string' && wrapped.startsWith('\0J')) {
-      const payloadSize = Buffer.byteLength(wrapped) - 2; // Subtract 2 bytes for '\0J' prefix
-      if (compression && payloadSize >= minSizeBytes) {
-        forceCompression = true;
-      } else {
+      if (!compression) {
         forceCompression = false;
+      } else {
+        const payloadSize = Buffer.byteLength(wrapped) - 2; // Subtract 2 bytes for '\0J' prefix
+        forceCompression = payloadSize >= minSizeBytes;
       }
     }
 
