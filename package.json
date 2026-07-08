@@ -1,0 +1,30 @@
+{
+  "name": "offheap",
+  "version": "0.1.0",
+  "description": "High-performance off-heap caching framework for Node.js written in Rust",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "offheap",
+    "triple": {
+      "defaults": true,
+      "additional": []
+    }
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish",
+    "test": "node --test tests/index.test.js",
+    "benchmark": "node benchmarks/js_bench.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "tinybench": "^2.9.0"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "license": "MIT OR Apache-2.0"
+}

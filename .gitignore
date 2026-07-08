@@ -1,0 +1,19 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Rust
+target/
+Cargo.lock
+
+# NAPI-RS Generated files (except loader and d.ts if required)
+*.node
+*.pdb
+*.ilk
+
+# Temporary directories
+temp/
+.gemini/
