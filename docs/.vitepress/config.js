@@ -29,7 +29,7 @@ export default {
     ],
     footer: {
       message: 'Released under the MIT and Apache 2.0 Licenses.',
-      copyright: 'Copyright © 2026 Ryan Gustav & OffHeap Contributors'
+      copyright: 'Copyright © 2026 Ryan Gustavo & OffHeap Contributors'
     }
   }
 }
