@@ -21,7 +21,7 @@
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
     "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
     "test": "node --test tests/index.test.js",
-    "benchmark": "node benchmarks/js_bench.js",
+    "benchmark": "node --expose-gc benchmarks/js_bench.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
