@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { CacheManager } = require('./index.js'); // NAPI generated file
+const { CacheManager } = require('../index.js'); // NAPI generated file
 
 test('CacheManager - isolated caches', () => {
   const manager = new CacheManager();

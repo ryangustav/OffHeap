@@ -25,7 +25,7 @@ impl CacheManager {
                 format!("Cache '{}' already exists", name),
             ));
         }
-        let cache = Cache::new_instance(config);
+        let cache = Cache::from_config(config);
         lock.insert(name, cache.clone());
         Ok(cache)
     }

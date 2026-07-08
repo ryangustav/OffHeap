@@ -353,11 +353,12 @@ impl CacheImpl for TinyLfuCache {
 
                     let main_has_capacity = self.probation.capacity > 0;
                     if main_has_capacity {
-                        if self.probation.len < self.probation.capacity {
-                            // probation has room, admit candidate directly
+                        let total_size = self.window.len + self.probation.len + self.protected.len;
+                        if total_size + 1 <= self.capacity {
+                            // Cache is not full yet. Admit candidate directly.
                             self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                         } else {
-                            // probation is full, we must select the probation tail as victim
+                            // Cache is full. Compare candidate and victim.
                             if let Some(prob_tail) = self.probation.tail {
                                 let victim_idx = prob_tail;
 
