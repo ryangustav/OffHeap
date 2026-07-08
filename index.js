@@ -27,25 +27,66 @@ function unwrapValue(val) {
 }
 
 class Cache {
-  constructor(nativeCache) {
+  constructor(nativeCache, config = {}) {
     this._native = nativeCache;
     this._id = Math.random().toString(36).substring(2);
+    
+    // L1 Cache config (default to 10% of capacity, capped at 10,000 keys)
+    const capacity = config.capacity || 10000;
+    this._l1Capacity = config.l1Capacity !== undefined 
+      ? config.l1Capacity 
+      : Math.min(10000, Math.ceil(capacity * 0.1));
+      
+    this._l1 = new Map();
     finalizer.register(this, nativeCache, this);
   }
 
+  _l1Set(key, value) {
+    if (this._l1Capacity <= 0) return;
+    this._l1.delete(key);
+    this._l1.set(key, value);
+    if (this._l1.size > this._l1Capacity) {
+      const oldest = this._l1.keys().next().value;
+      this._l1.delete(oldest);
+    }
+  }
+
   get(key) {
-    return unwrapValue(this._native.get(key));
+    // 1. Check JS-local L1 cache (FIFO read - zero writes on hit)
+    if (this._l1Capacity > 0) {
+      const l1Val = this._l1.get(key);
+      if (l1Val !== undefined) {
+        return l1Val;
+      }
+    }
+
+    // 2. Check Native L2 Cache
+    const nativeVal = unwrapValue(this._native.get(key));
+    if (nativeVal !== undefined) {
+      this._l1Set(key, nativeVal);
+    }
+    return nativeVal;
   }
 
   peek(key) {
+    if (this._l1Capacity > 0) {
+      const l1Val = this._l1.get(key);
+      if (l1Val !== undefined) {
+        return l1Val;
+      }
+    }
     return unwrapValue(this._native.peek(key));
   }
 
   has(key) {
+    if (this._l1Capacity > 0 && this._l1.has(key)) {
+      return true;
+    }
     return this._native.has(key);
   }
 
   set(key, value, ttlMs) {
+    this._l1Set(key, value);
     const wrapped = wrapValue(value);
     return unwrapValue(this._native.set(key, wrapped, ttlMs));
   }
@@ -55,10 +96,12 @@ class Cache {
   }
 
   delete(key) {
+    this._l1.delete(key);
     return this._native.delete(key);
   }
 
   clear() {
+    this._l1.clear();
     this._native.clear();
   }
 
@@ -78,19 +121,44 @@ class Cache {
   }
 
   increment(key, delta = 1, ttlMs) {
-    return this._native.increment(key, delta, ttlMs);
+    const val = this._native.increment(key, delta, ttlMs);
+    this._l1Set(key, val);
+    return val;
   }
 
   decrement(key, delta = 1, ttlMs) {
-    return this._native.decrement(key, delta, ttlMs);
+    const val = this._native.decrement(key, delta, ttlMs);
+    this._l1Set(key, val);
+    return val;
   }
 
   mget(keys) {
-    const res = this._native.mget(keys);
-    for (const k in res) {
-      res[k] = unwrapValue(res[k]);
+    const missing = [];
+    const result = {};
+
+    for (const key of keys) {
+      if (this._l1Capacity > 0) {
+        const val = this._l1.get(key);
+        if (val !== undefined) {
+          result[key] = val;
+          continue;
+        }
+      }
+      missing.push(key);
     }
-    return res;
+
+    if (missing.length > 0) {
+      const nativeRes = this._native.mget(missing);
+      for (const key of missing) {
+        const val = unwrapValue(nativeRes[key]);
+        if (val !== undefined) {
+          result[key] = val;
+          this._l1Set(key, val);
+        }
+      }
+    }
+
+    return result;
   }
 
   mset(entries, ttlMs) {
@@ -99,7 +167,9 @@ class Cache {
     }
     const wrapped = {};
     for (const k in entries) {
-      wrapped[k] = wrapValue(entries[k]);
+      const val = entries[k];
+      this._l1Set(k, val);
+      wrapped[k] = wrapValue(val);
     }
     this._native.mset(wrapped, ttlMs);
   }
@@ -108,10 +178,14 @@ class Cache {
     if (!Array.isArray(keys)) {
       throw new Error('mdelete requires an array of keys');
     }
+    for (const k of keys) {
+      this._l1.delete(k);
+    }
     return this._native.mdelete(keys);
   }
 
   dispose() {
+    this._l1.clear();
     finalizer.unregister(this);
     this._native.dispose();
   }
@@ -165,7 +239,7 @@ class CacheManager {
     activeManagers.add(this);
   }
 
-  createCache(name, config) {
+  createCache(name, config = {}) {
     const rawConfig = {
       policy: config.policy,
       capacity: config.capacity,
@@ -173,7 +247,7 @@ class CacheManager {
       maxBytes: config.maxBytes,
     };
     const nativeCache = this._native.createCache(name, rawConfig);
-    return new Cache(nativeCache);
+    return new Cache(nativeCache, config);
   }
 
   getCache(name) {

@@ -7,9 +7,10 @@ async function runBenchmark() {
   const capacity = 10000;
 
   // Instantiate caches
-  const lruCache = manager.createCache('bench-lru', { policy: 'lru', capacity });
-  const arcCache = manager.createCache('bench-arc', { policy: 'arc', capacity });
-  const tinyLfuCache = manager.createCache('bench-tinylfu', { policy: 'tinylfu', capacity });
+  const lruCacheL1 = manager.createCache('bench-lru-l1', { policy: 'lru', capacity, l1Capacity: capacity });
+  const lruCacheL2 = manager.createCache('bench-lru-l2', { policy: 'lru', capacity, l1Capacity: 0 });
+  const arcCache = manager.createCache('bench-arc', { policy: 'arc', capacity, l1Capacity: 0 });
+  const tinyLfuCache = manager.createCache('bench-tinylfu', { policy: 'tinylfu', capacity, l1Capacity: 0 });
   const jsLru = new LRUCache({ max: capacity });
   const jsMap = new Map();
 
@@ -30,16 +31,12 @@ async function runBenchmark() {
       jsLru.set(keys[writeIdx % keys.length], val);
       writeIdx++;
     })
-    .add('OffHeap LRU - Set', () => {
-      lruCache.set(keys[writeIdx % keys.length], val);
+    .add('OffHeap L1+L2 - Set', () => {
+      lruCacheL1.set(keys[writeIdx % keys.length], val);
       writeIdx++;
     })
-    .add('OffHeap ARC - Set', () => {
-      arcCache.set(keys[writeIdx % keys.length], val);
-      writeIdx++;
-    })
-    .add('OffHeap W-TinyLFU - Set', () => {
-      tinyLfuCache.set(keys[writeIdx % keys.length], val);
+    .add('OffHeap L2 Only - Set', () => {
+      lruCacheL2.set(keys[writeIdx % keys.length], val);
       writeIdx++;
     });
 
@@ -51,7 +48,8 @@ async function runBenchmark() {
   for (let i = 0; i < capacity; i++) {
     jsMap.set(keys[i], val);
     jsLru.set(keys[i], val);
-    lruCache.set(keys[i], val);
+    lruCacheL1.set(keys[i], val);
+    lruCacheL2.set(keys[i], val);
     arcCache.set(keys[i], val);
     tinyLfuCache.set(keys[i], val);
   }
@@ -67,15 +65,19 @@ async function runBenchmark() {
       jsLru.get(keys[readIdx % capacity]);
       readIdx++;
     })
-    .add('OffHeap LRU - Get', () => {
-      lruCache.get(keys[readIdx % capacity]);
+    .add('OffHeap L1 Hit - Get', () => {
+      lruCacheL1.get(keys[readIdx % capacity]);
       readIdx++;
     })
-    .add('OffHeap ARC - Get', () => {
+    .add('OffHeap L2 Hit (LRU) - Get', () => {
+      lruCacheL2.get(keys[readIdx % capacity]);
+      readIdx++;
+    })
+    .add('OffHeap L2 Hit (ARC) - Get', () => {
       arcCache.get(keys[readIdx % capacity]);
       readIdx++;
     })
-    .add('OffHeap W-TinyLFU - Get', () => {
+    .add('OffHeap L2 Hit (W-TinyLFU) - Get', () => {
       tinyLfuCache.get(keys[readIdx % capacity]);
       readIdx++;
     });
@@ -84,7 +86,8 @@ async function runBenchmark() {
   await benchGet.run();
   console.table(benchGet.table());
 
-  lruCache.dispose();
+  lruCacheL1.dispose();
+  lruCacheL2.dispose();
   arcCache.dispose();
   tinyLfuCache.dispose();
   manager.dispose();

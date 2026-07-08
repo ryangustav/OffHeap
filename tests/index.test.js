@@ -44,8 +44,8 @@ test('Cache - DataType Preservation (String, Buffer, JSON Object)', () => {
 
 test('Cache Policies - LRU eviction', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 3
-  const cache = manager.createCache('lru-evict', { policy: 'lru', capacity: 3, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 3
+  const cache = manager.createCache('lru-evict', { policy: 'lru', capacity: 3, shards: 1, l1Capacity: 0 });
 
   cache.set('a', 1);
   cache.set('b', 2);
@@ -65,8 +65,8 @@ test('Cache Policies - LRU eviction', () => {
 
 test('Cache Policies - ARC adaptation & eviction', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 4
-  const cache = manager.createCache('arc-evict', { policy: 'arc', capacity: 4, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 4
+  const cache = manager.createCache('arc-evict', { policy: 'arc', capacity: 4, shards: 1, l1Capacity: 0 });
 
   // Warm up ARC
   cache.set('a', 1);
@@ -88,8 +88,8 @@ test('Cache Policies - ARC adaptation & eviction', () => {
 
 test('Cache Policies - W-TinyLFU eviction competition', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 10
-  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 10
+  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
 
   // Fill cache
   for (let i = 0; i < 12; i++) {
@@ -186,7 +186,8 @@ test('Cache - Batch Operations (mget / mset / mdelete)', () => {
 
 test('Cache - has() and peek()', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-has-peek', { policy: 'lru', capacity: 3, shards: 1 });
+  // Set l1Capacity: 0 to ensure we directly verify native peek & LRU updating
+  const cache = manager.createCache('lru-has-peek', { policy: 'lru', capacity: 3, shards: 1, l1Capacity: 0 });
 
   cache.set('a', 1);
   cache.set('b', 2);
@@ -227,12 +228,13 @@ test('Cache - getOrSet() Coalescing', async () => {
 
 test('Cache - maxBytes Memory Eviction Limit', () => {
   const manager = new CacheManager();
-  // Set capacity = 100, shards = 1, but maxBytes = 35.
+  // Set capacity = 100, shards = 1, l1Capacity = 0, but maxBytes = 35.
   const cache = manager.createCache('lru-bytes', {
     policy: 'lru',
     capacity: 100,
     maxBytes: 35,
-    shards: 1
+    shards: 1,
+    l1Capacity: 0
   });
 
   cache.set('k1', '1234567890'); // key len 2 + value len 10 = 12 bytes + 1 tag = 13 bytes.

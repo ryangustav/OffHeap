@@ -3,6 +3,7 @@ export interface CacheConfig {
   capacity: number;
   shards?: number;
   maxBytes?: number;
+  l1Capacity?: number;
 }
 
 export interface CacheStats {
