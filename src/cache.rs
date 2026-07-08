@@ -60,7 +60,7 @@ impl Cache {
         Ok(Arc::clone(&self.shards[idx]))
     }
 
-    fn serialize_value(&self, env: Env, value: JsUnknown) -> Result<Vec<u8>> {
+    fn serialize_value(&self, _env: Env, value: JsUnknown) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let value_type = value.get_type()?;
 
@@ -72,8 +72,14 @@ impl Cache {
         } else if value_type == ValueType::String {
             let js_str = JsString::try_from(value)?;
             let utf8 = js_str.into_utf8()?;
-            bytes.push(2); // Tag: String
-            bytes.extend_from_slice(utf8.as_slice());
+            let slice = utf8.as_slice();
+            if slice.starts_with(b"\0J") {
+                bytes.push(3); // Tag: JSON
+                bytes.extend_from_slice(&slice[2..]);
+            } else {
+                bytes.push(2); // Tag: String
+                bytes.extend_from_slice(slice);
+            }
         } else if value_type == ValueType::Number {
             let num = value.coerce_to_number()?;
             let val = num.get_double()?;
@@ -81,18 +87,12 @@ impl Cache {
                 bytes.push(4); // Tag: i64
                 bytes.extend_from_slice(&(val as i64).to_ne_bytes());
             } else {
-                let json_val = serde_json::Value::Number(serde_json::Number::from_f64(val).unwrap());
-                let serialized = serde_json::to_vec(&json_val)
-                    .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                bytes.push(3); // Tag: JSON
-                bytes.extend_from_slice(&serialized);
+                let s = val.to_string();
+                bytes.push(3); // Tag: JSON (float represented as string)
+                bytes.extend_from_slice(s.as_bytes());
             }
         } else {
-            let json_val: serde_json::Value = env.from_js_value(value)?;
-            let serialized = serde_json::to_vec(&json_val)
-                .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-            bytes.push(3); // Tag: JSON
-            bytes.extend_from_slice(&serialized);
+            return Err(napi::Error::new(napi::Status::InvalidArg, "Complex types must be serialized to JSON in JS wrapper"));
         }
         Ok(bytes)
     }
@@ -115,10 +115,15 @@ impl Cache {
                 Ok(js_str.into_unknown())
             }
             3 => {
-                let json_val: serde_json::Value = serde_json::from_slice(payload)
-                    .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                let parsed = env.to_js_value(&json_val)?;
-                Ok(parsed)
+                // Prepend \0J prefix so the JS wrapper knows to JSON.parse it
+                let s = std::str::from_utf8(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                let mut prefixed = String::with_capacity(2 + s.len());
+                prefixed.push('\0');
+                prefixed.push('J');
+                prefixed.push_str(s);
+                let js_str = env.create_string(&prefixed)?;
+                Ok(js_str.into_unknown())
             }
             4 => {
                 if payload.len() == 8 {
@@ -283,10 +288,10 @@ impl Cache {
                         }
                     }
                     3 => {
-                        let json_val: serde_json::Value = serde_json::from_slice(payload)
-                            .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                        if let Some(n) = json_val.as_i64() {
-                            current_val = n;
+                        let s = std::str::from_utf8(payload)
+                            .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                        if let Ok(val) = s.parse::<i64>() {
+                            current_val = val;
                         } else {
                             return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a valid 64-bit integer"));
                         }

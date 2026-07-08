@@ -9,6 +9,23 @@ const finalizer = new FinalizationRegistry((nativeCache) => {
   }
 });
 
+function wrapValue(val) {
+  if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
+    return '\0J' + JSON.stringify(val);
+  }
+  if (Array.isArray(val) || typeof val === 'boolean') {
+    return '\0J' + JSON.stringify(val);
+  }
+  return val;
+}
+
+function unwrapValue(val) {
+  if (typeof val === 'string' && val.startsWith('\0J')) {
+    return JSON.parse(val.substring(2));
+  }
+  return val;
+}
+
 class Cache {
   constructor(nativeCache) {
     this._native = nativeCache;
@@ -17,11 +34,11 @@ class Cache {
   }
 
   get(key) {
-    return this._native.get(key);
+    return unwrapValue(this._native.get(key));
   }
 
   peek(key) {
-    return this._native.peek(key);
+    return unwrapValue(this._native.peek(key));
   }
 
   has(key) {
@@ -29,7 +46,8 @@ class Cache {
   }
 
   set(key, value, ttlMs) {
-    return this._native.set(key, value, ttlMs);
+    const wrapped = wrapValue(value);
+    return unwrapValue(this._native.set(key, wrapped, ttlMs));
   }
 
   touch(key, ttlMs) {
@@ -68,14 +86,22 @@ class Cache {
   }
 
   mget(keys) {
-    return this._native.mget(keys);
+    const res = this._native.mget(keys);
+    for (const k in res) {
+      res[k] = unwrapValue(res[k]);
+    }
+    return res;
   }
 
   mset(entries, ttlMs) {
     if (typeof entries !== 'object' || entries === null) {
       throw new Error('mset requires an object of key-value entries');
     }
-    this._native.mset(entries, ttlMs);
+    const wrapped = {};
+    for (const k in entries) {
+      wrapped[k] = wrapValue(entries[k]);
+    }
+    this._native.mset(wrapped, ttlMs);
   }
 
   mdelete(keys) {
