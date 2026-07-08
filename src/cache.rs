@@ -64,7 +64,7 @@ impl Cache {
         Ok(Arc::clone(&self.shards[idx]))
     }
 
-    fn serialize_value(&self, _env: Env, value: JsUnknown) -> Result<Vec<u8>> {
+    fn serialize_value(&self, _env: Env, value: JsUnknown, force_compression: Option<bool>) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let value_type = value.get_type()?;
 
@@ -78,11 +78,13 @@ impl Cache {
             let utf8 = js_str.into_utf8()?;
             let slice = utf8.as_slice();
             if slice.starts_with(b"\0J") {
-                bytes.push(3); // Tag: JSON
-                if self.compression {
+                let compress = force_compression.unwrap_or(self.compression);
+                if compress {
+                    bytes.push(5); // Tag: Compressed JSON
                     let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
                     bytes.extend_from_slice(&compressed);
                 } else {
+                    bytes.push(3); // Tag: JSON (Raw)
                     bytes.extend_from_slice(&slice[2..]);
                 }
             } else {
@@ -97,11 +99,13 @@ impl Cache {
                 bytes.extend_from_slice(&(val as i64).to_ne_bytes());
             } else {
                 let s = val.to_string();
-                bytes.push(3); // Tag: JSON (float represented as string)
-                if self.compression {
+                let compress = force_compression.unwrap_or(self.compression);
+                if compress {
+                    bytes.push(5); // Tag: Compressed JSON
                     let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
                     bytes.extend_from_slice(&compressed);
                 } else {
+                    bytes.push(3); // Tag: JSON (Raw)
                     bytes.extend_from_slice(s.as_bytes());
                 }
             }
@@ -129,19 +133,12 @@ impl Cache {
                 Ok(js_str.into_unknown())
             }
             3 => {
-                let s = if self.compression {
-                    let decompressed = lz4_flex::decompress_size_prepended(payload)
-                        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
-                    std::str::from_utf8(&decompressed)
-                        .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?.to_string()
-                } else {
-                    std::str::from_utf8(payload)
-                        .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?.to_string()
-                };
+                let s = std::str::from_utf8(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
                 let mut prefixed = String::with_capacity(2 + s.len());
                 prefixed.push('\0');
                 prefixed.push('J');
-                prefixed.push_str(&s);
+                prefixed.push_str(s);
                 let js_str = env.create_string(&prefixed)?;
                 Ok(js_str.into_unknown())
             }
@@ -153,6 +150,18 @@ impl Cache {
                 } else {
                     Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted"))
                 }
+            }
+            5 => {
+                let decompressed = lz4_flex::decompress_size_prepended(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
+                let s = std::str::from_utf8(&decompressed)
+                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                let mut prefixed = String::with_capacity(2 + s.len());
+                prefixed.push('\0');
+                prefixed.push('J');
+                prefixed.push_str(s);
+                let js_str = env.create_string(&prefixed)?;
+                Ok(js_str.into_unknown())
             }
             _ => Err(napi::Error::new(napi::Status::InvalidArg, "Invalid data type tag in cache storage")),
         }
@@ -196,8 +205,8 @@ impl Cache {
     }
 
     #[napi]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>) -> Result<()> {
-        let bytes = self.serialize_value(env, value)?;
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
+        let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         
         let shard_lock = self.get_shard(&key)?;
@@ -364,7 +373,7 @@ impl Cache {
             let key = key_str.into_utf8()?.into_owned()?;
             
             let val: JsUnknown = entries.get_named_property(&key)?;
-            let bytes = self.serialize_value(env, val)?;
+            let bytes = self.serialize_value(env, val, None)?;
             
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();

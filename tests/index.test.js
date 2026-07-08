@@ -278,3 +278,40 @@ test('Cache - Optional LZ4 Compression', () => {
   cache.dispose();
   manager.dispose();
 });
+
+test('Cache - Three-layered Config & Overrides', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 100 },
+    l1: { enabled: true, capacity: 5 },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache1 = manager.createCache('test-override-1', {
+    compression: { enabled: false }
+  });
+
+  const cache2 = manager.createCache('test-override-2');
+
+  const smallObj = { val: 'small' };
+  const largeObj = { val: 'a'.repeat(200) };
+
+  // cache1 has compression disabled, so it shouldn't compress even large objects
+  cache1.set('k1', largeObj);
+  assert.deepStrictEqual(cache1.get('k1'), largeObj);
+
+  // cache2 has compression enabled (inherited), but k2 is small (<100 bytes) so it won't compress
+  cache2.set('k2', smallObj);
+  assert.deepStrictEqual(cache2.get('k2'), smallObj);
+
+  // cache2: k3 is large (>=100 bytes) so it will compress
+  cache2.set('k3', largeObj);
+  assert.deepStrictEqual(cache2.get('k3'), largeObj);
+
+  // cache2: k4 is large, but operation override disables compression
+  cache2.set('k4', largeObj, { compression: false });
+  assert.deepStrictEqual(cache2.get('k4'), largeObj);
+
+  cache1.dispose();
+  cache2.dispose();
+  manager.dispose();
+});

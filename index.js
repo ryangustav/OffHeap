@@ -26,16 +26,84 @@ function unwrapValue(val) {
   return val;
 }
 
+const DEFAULT_CONFIG = {
+  shards: 8,
+  eviction: {
+    policy: 'tinylfu',
+    capacity: 10000,
+    maxBytes: undefined,
+  },
+  compression: {
+    enabled: false,
+    algorithm: 'lz4',
+    minSizeBytes: 1024,
+  },
+  l1: {
+    enabled: true,
+    capacity: undefined,
+  },
+  ttl: {
+    defaultMs: undefined,
+    mode: 'absolute', // absolute or sliding
+  }
+};
+
+function mergeConfigs(parent, child) {
+  const result = { ...parent };
+  for (const k in child) {
+    if (child[k] && typeof child[k] === 'object' && !Array.isArray(child[k])) {
+      result[k] = mergeConfigs(parent[k] || {}, child[k]);
+    } else if (child[k] !== undefined) {
+      result[k] = child[k];
+    }
+  }
+  return result;
+}
+
+function normalizeConfig(config) {
+  if (!config) return {};
+  const normalized = { ...config };
+  
+  // Eviction normalization
+  if (config.policy !== undefined || config.capacity !== undefined || config.maxBytes !== undefined) {
+    normalized.eviction = {
+      policy: config.policy,
+      capacity: config.capacity,
+      maxBytes: config.maxBytes,
+      ...config.eviction
+    };
+  }
+  
+  // Compression normalization
+  if (config.compression !== undefined) {
+    normalized.compression = typeof config.compression === 'object'
+      ? config.compression
+      : { enabled: !!config.compression };
+  }
+  
+  // L1 normalization
+  if (config.l1Capacity !== undefined) {
+    normalized.l1 = {
+      enabled: config.l1Capacity > 0,
+      capacity: config.l1Capacity,
+      ...config.l1
+    };
+  }
+
+  return normalized;
+}
+
 class Cache {
   constructor(nativeCache, config = {}) {
     this._native = nativeCache;
     this._id = Math.random().toString(36).substring(2);
+    this._config = config;
     
-    // L1 Cache config (default to 10% of capacity, capped at 10,000 keys)
-    const capacity = config.capacity || 10000;
-    this._l1Capacity = config.l1Capacity !== undefined 
-      ? config.l1Capacity 
-      : Math.min(10000, Math.ceil(capacity * 0.1));
+    // Set up L1 Cache
+    const capacity = (config.eviction && config.eviction.capacity) || 10000;
+    this._l1Capacity = (config.l1 && config.l1.enabled)
+      ? (config.l1.capacity !== undefined ? config.l1.capacity : Math.min(10000, Math.ceil(capacity * 0.1)))
+      : 0;
       
     this._l1 = new Map();
     finalizer.register(this, nativeCache, this);
@@ -85,11 +153,36 @@ class Cache {
     return this._native.has(key);
   }
 
-  set(key, value, ttlMs) {
+  set(key, value, ttlMsOrOptions) {
+    let ttlMs = this._config.ttl ? this._config.ttl.defaultMs : undefined;
+    let compression = this._config.compression ? this._config.compression.enabled : false;
+    let minSizeBytes = this._config.compression ? (this._config.compression.minSizeBytes || 1024) : 1024;
+
+    if (typeof ttlMsOrOptions === 'number') {
+      ttlMs = ttlMsOrOptions;
+    } else if (ttlMsOrOptions && typeof ttlMsOrOptions === 'object') {
+      if (ttlMsOrOptions.ttlMs !== undefined) ttlMs = ttlMsOrOptions.ttlMs;
+      if (ttlMsOrOptions.compression !== undefined) compression = ttlMsOrOptions.compression;
+      if (ttlMsOrOptions.minSizeBytes !== undefined) minSizeBytes = ttlMsOrOptions.minSizeBytes;
+    }
+
     // Invalidate L1 to prevent stale data
     this._l1.delete(key);
+
     const wrapped = wrapValue(value);
-    this._native.set(key, wrapped, ttlMs);
+
+    // Determine if we should compress this payload based on type and size threshold
+    let forceCompression = undefined;
+    if (typeof wrapped === 'string' && wrapped.startsWith('\0J')) {
+      const payloadSize = Buffer.byteLength(wrapped) - 2; // Subtract 2 bytes for '\0J' prefix
+      if (compression && payloadSize >= minSizeBytes) {
+        forceCompression = true;
+      } else {
+        forceCompression = false;
+      }
+    }
+
+    this._native.set(key, wrapped, ttlMs, forceCompression);
   }
 
   touch(key, ttlMs) {
@@ -235,27 +328,29 @@ class Cache {
 const activeManagers = new Set();
 
 class CacheManager {
-  constructor() {
+  constructor(globalConfig = {}) {
     this._native = new NativeCacheManager();
+    this._globalConfig = mergeConfigs(DEFAULT_CONFIG, normalizeConfig(globalConfig));
     activeManagers.add(this);
   }
 
   createCache(name, config = {}) {
+    const merged = mergeConfigs(this._globalConfig, normalizeConfig(config));
     const rawConfig = {
-      policy: config.policy,
-      capacity: config.capacity,
-      shards: config.shards,
-      maxBytes: config.maxBytes,
-      compression: config.compression,
+      policy: merged.eviction.policy,
+      capacity: merged.eviction.capacity,
+      shards: merged.shards,
+      maxBytes: merged.eviction.maxBytes,
+      compression: merged.compression.enabled,
     };
     const nativeCache = this._native.createCache(name, rawConfig);
-    return new Cache(nativeCache, config);
+    return new Cache(nativeCache, merged);
   }
 
   getCache(name) {
     const nativeCache = this._native.getCache(name);
     if (!nativeCache) return null;
-    return new Cache(nativeCache);
+    return new Cache(nativeCache, this._globalConfig);
   }
 
   deleteCache(name) {

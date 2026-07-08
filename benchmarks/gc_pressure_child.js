@@ -70,11 +70,19 @@ async function run() {
   } else {
     manager = new CacheManager();
     cache = manager.createCache('zipf-hybrid-gc', {
-      policy: 'lru',
-      capacity: numKeys,
       shards: 16,
-      l1Capacity: 10000,
-      compression: true
+      eviction: {
+        policy: 'lru',
+        capacity: numKeys
+      },
+      l1: {
+        enabled: true,
+        capacity: 10000
+      },
+      compression: {
+        enabled: true,
+        minSizeBytes: 200
+      }
     });
     for (let i = 0; i < numKeys; i++) {
       cache.set(keys[i], getLargePayload(i));

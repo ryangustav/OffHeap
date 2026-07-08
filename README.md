@@ -75,30 +75,38 @@ To ensure high performance and transparent hit-rate optimization under varying w
 ```javascript
 const { CacheManager } = require('./index.js');
 
-const manager = new CacheManager();
+// 1. Global Config: Set defaults for all namespace caches
+const manager = new CacheManager({
+  eviction: { policy: 'tinylfu', capacity: 50000 },
+  compression: { enabled: true, minSizeBytes: 1024 }, // LZ4 on JSON payloads >= 1KB
+  l1: { enabled: true },
+  ttl: { defaultMs: 1000 * 60 * 15 } // 15 mins default
+});
 
-// Create isolated caches with different policies and capacities
+// 2. Namespace Config: Inherits from global, overrides specific knobs
 const sessionCache = manager.createCache('sessions', {
-  policy: 'lru',
-  capacity: 10000
+  eviction: { policy: 'arc', capacity: 10000 },
+  compression: { enabled: false }, // Small session objects, skip CPU compression
+  ttl: { defaultMs: 1000 * 60 * 30 } // 30 mins override
 });
 
-const productCache = manager.createCache('products', {
-  policy: 'tinylfu',
-  capacity: 50000
-});
+const reportCache = manager.createCache('reports'); // Inherits all global defaults
+
+// 3. Operation Override: Fine-grained knobs on set()
+reportCache.set('heavy_report_data', { id: 101, rows: [...] }); // Compressed (>=1KB)
+reportCache.set('noclick_record', { clicked: false }, { compression: false }); // Uncompressed override
 
 // A. Store Buffers (Zero JSON overhead, 20% RSS memory saving)
-productCache.set('prod_101', Buffer.from([255, 128, 64]));
-const rawBuf = productCache.get('prod_101'); // returns Buffer
+reportCache.set('prod_binary_101', Buffer.from([255, 128, 64]));
+const rawBuf = reportCache.get('prod_binary_101'); // returns Buffer
 
 // B. Store JSON objects
-productCache.set('prod_metadata', { id: 101, price: 99.99 });
-const meta = productCache.get('prod_metadata'); // returns JavaScript Object
+reportCache.set('prod_metadata', { id: 101, price: 99.99 });
+const meta = reportCache.get('prod_metadata'); // returns JavaScript Object
 
 // C. Batch Operations (Optimized array serialization, single FFI crossing)
-productCache.mset({ key1: 'value1', key2: 'value2' });
-const results = productCache.mget(['key1', 'key2', 'key3']); // returns { key1: 'value1', key2: 'value2' }
+reportCache.mset({ key1: 'value1', key2: 'value2' });
+const results = reportCache.mget(['key1', 'key2']); // returns { key1: 'value1', key2: 'value2' }
 ```
 
 ---
