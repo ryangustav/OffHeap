@@ -6,10 +6,12 @@
   "types": "index.d.ts",
   "napi": {
     "name": "offheap",
-    "triple": {
-      "defaults": true,
-      "additional": []
-    }
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ]
   },
   "scripts": {
     "artifacts": "napi artifacts",
@@ -17,11 +19,15 @@
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
     "test": "node --test tests/index.test.js",
-    "benchmark": "node benchmarks/js_bench.js"
+    "benchmark": "node benchmarks/js_bench.js",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4",
-    "tinybench": "^2.9.0"
+    "tinybench": "^2.9.0",
+    "vitepress": "^1.0.2"
   },
   "engines": {
     "node": ">= 18"
