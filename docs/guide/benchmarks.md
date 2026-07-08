@@ -43,17 +43,18 @@ We ran a benchmark simulating 1,000,000 operations under active memory allocatio
 
 | Metric | JS lru-cache (In-Heap) | OffHeap Hybrid (L1+L2) | Difference / Impact |
 | :--- | :--- | :--- | :--- |
-| **Total Duration** | 14,733 ms | 10,259 ms | **OffHeap is 1.4x faster overall** |
-| **Average Cache Latency** | 1.1 μs | 9.0 μs | FFI crossing baseline |
+| **Total Duration** | 14,320 ms | 10,355 ms | **OffHeap is 1.38x faster overall** |
+| **Average Cache Latency** | 1.1 μs | 9.2 μs | FFI crossing baseline + LZ4 decompression |
 | **V8 GC Events Triggered** | 100 | 100 | Sync GC sweep checks |
-| **Total V8 GC Pause Duration** | **13,295.8 ms** (13.3s) | **887.8 ms** (0.88s) | **OffHeap spends 15.0x less time in GC** |
-| **Worst Single GC STW Stop** | **319.8 ms** | **16.7 ms** | **OffHeap worst-case pause is 19.1x shorter** |
-| **Heap Usage (End)** | 251.56 MB | 47.19 MB | Flat V8 Heap footprint |
-| **RSS Memory (Start)** | 85.70 MB | 85.24 MB | Clean start isolation |
-| **RSS Memory (End)** | 446.57 MB | 556.70 MB | Process RSS at 500k entries |
-| **RSS Memory Delta** | **360.87 MB** | **471.46 MB** | Isolated footprint overhead |
+| **Total V8 GC Pause Duration** | **12,886.2 ms** (12.8s) | **851.3 ms** (0.85s) | **OffHeap spends 15.1x less time in GC** |
+| **Worst Single GC STW Stop** | **274.4 ms** | **14.1 ms** | **OffHeap worst-case pause is 19.4x shorter** |
+| **Heap Usage (End)** | 251.56 MB | 47.22 MB | Flat V8 Heap footprint |
+| **RSS Memory (Start)** | 85.55 MB | 85.57 MB | Clean start isolation |
+| **RSS Memory (End)** | 445.24 MB | 341.00 MB | Process RSS at 500k entries |
+| **RSS Memory Delta** | **359.69 MB** | **255.44 MB** | **OffHeap uses 104.25 MB less RSS (29% reduction)** |
 
-*   **Footprint Explanation**: In clean, isolated OS processes, the memory footprint delta of `OffHeap` is **471.46 MB** compared to JS `lru-cache`'s **360.87 MB** (only a ~30% physical overhead to store 500k records off-heap, completely protecting the V8 heap from Stop-the-World pauses).
+*   **Footprint Explanation**: OffHeap incorporates transparent native **LZ4 block compression** for serialized JSON values (via `lz4_flex`). Under clean isolated processes caching 500k JSON records, OffHeap uses only **255.44 MB** RSS Delta compared to JS `lru-cache`'s **359.69 MB** (a **29% reduction in physical RAM**).
+
 
 ### 3. Binary Buffer Storage Memory Footprint (500k Keys, 500B Buffers)
 

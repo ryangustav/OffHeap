@@ -75,7 +75,8 @@ impl Cache {
             let slice = utf8.as_slice();
             if slice.starts_with(b"\0J") {
                 bytes.push(3); // Tag: JSON
-                bytes.extend_from_slice(&slice[2..]);
+                let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
+                bytes.extend_from_slice(&compressed);
             } else {
                 bytes.push(2); // Tag: String
                 bytes.extend_from_slice(slice);
@@ -89,7 +90,8 @@ impl Cache {
             } else {
                 let s = val.to_string();
                 bytes.push(3); // Tag: JSON (float represented as string)
-                bytes.extend_from_slice(s.as_bytes());
+                let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
+                bytes.extend_from_slice(&compressed);
             }
         } else {
             return Err(napi::Error::new(napi::Status::InvalidArg, "Complex types must be serialized to JSON in JS wrapper"));
@@ -115,8 +117,9 @@ impl Cache {
                 Ok(js_str.into_unknown())
             }
             3 => {
-                // Prepend \0J prefix so the JS wrapper knows to JSON.parse it
-                let s = std::str::from_utf8(payload)
+                let decompressed = lz4_flex::decompress_size_prepended(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
+                let s = std::str::from_utf8(&decompressed)
                     .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
                 let mut prefixed = String::with_capacity(2 + s.len());
                 prefixed.push('\0');

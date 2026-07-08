@@ -26,31 +26,29 @@ This test simulates active request handling under memory pressure, comparing JS 
 
 | Metric | JS lru-cache (In-Heap) | OffHeap Hybrid (L1+L2) | Difference / Impact |
 | :--- | :--- | :--- | :--- |
-| **Total Duration** | 14,733 ms | 10,259 ms | **OffHeap is 1.4x faster overall** |
-| **Average Cache Latency** | **1.1 μs** | **9.0 μs** | FFI crossing baseline |
+| **Total Duration** | 14,320 ms | 10,355 ms | **OffHeap is 1.38x faster overall** |
+| **Average Cache Latency** | **1.1 μs** | **9.2 μs** | FFI boundary + LZ4 decompression |
 | **V8 GC Events Triggered** | 100 | 100 | Sync GC sweep checks |
-| **Total V8 GC Pause Duration**| **13,295.8 ms** (13.3s) | **887.8 ms** (0.88s) | **OffHeap spends 15.0x less time in GC** |
-| **Worst Single GC STW Stop** | **319.8 ms** | **16.7 ms** | **OffHeap worst-case pause is 19.1x shorter** |
+| **Total V8 GC Pause Duration**| **12,886.2 ms** (12.8s) | **851.3 ms** (0.85s) | **OffHeap spends 15.1x less time in GC** |
+| **Worst Single GC STW Stop** | **274.4 ms** | **14.1 ms** | **OffHeap worst-case pause is 19.4x shorter** |
 
-*   **The SLA Winner**: While JS `lru-cache` causes the event loop to freeze for up to **319.8 ms** during a sweep (blocking all incoming HTTP requests), OffHeap isolates cache entries in native Rust memory, restricting the maximum event loop pause to just **16.7 ms**.
+*   **The SLA Winner**: While JS `lru-cache` causes the event loop to freeze for up to **274.4 ms** during a sweep (blocking all incoming HTTP requests), OffHeap isolates cache entries in native Rust memory, restricting the maximum event loop pause to just **14.1 ms**.
 
 ---
 
 ### 2. Isolated RSS Footprint Trade-off
-Storing data off-heap introduces different memory layouts depending on your payload type:
+OffHeap incorporates transparent native **LZ4 block compression** for serialized JSON values (via `lz4_flex`) and `mimalloc` to avoid memory fragmentation, providing a lower memory footprint than in-heap caches:
 
 #### A. Caching JavaScript JSON Objects (500k Entries, ~500B Objects)
-*   **JS `lru-cache` Delta RSS**: **360.87 MB**
-*   **OffHeap L2 Delta RSS**: **471.46 MB** (~30% higher memory)
-*   *Why?* V8 uses highly optimized "Hidden Classes" to store object property names once. OffHeap serializes JS objects to JSON strings, meaning the schema keys (`"id"`, `"price"`, etc.) are duplicated in every record.
+*   **JS `lru-cache` Delta RSS**: **359.69 MB**
+*   **OffHeap L2 Delta RSS**: **255.44 MB** (**29% physical memory reduction!**)
+*   *Why?* While V8 hidden classes deduplicate object structures in memory, storing them as raw objects incurs massive V8 heap overhead. OffHeap serializes and compresses them with LZ4 in Rust, dropping the raw footprint by ~50%.
 
 #### B. Caching Binary Buffers (500k Entries, 500B Buffers)
 *   **JS `lru-cache` Delta RSS**: **447.94 MB**
-*   **OffHeap L2 Delta RSS**: **359.75 MB** (**20% memory reduction!**)
+*   **OffHeap L2 Delta RSS**: **359.75 MB** (**20% physical memory reduction!**)
 *   *Why?* Unique `Buffer` objects in JavaScript carry massive JS wrapper object overhead (~100 bytes per buffer wrapper) and alignment tracking. OffHeap copies contiguous raw bytes directly into native memory via `mimalloc`, avoiding V8 wrapper overhead entirely.
 
-#### C. How to Achieve Memory Savings Today
-To minimize the memory footprint of JSON objects off-heap, **serialize them to binary Buffers (e.g., using MessagePack or Protocol Buffers) before calling `set`**. This strips repeated schema keys and allows OffHeap to store raw bytes directly, achieving the **20% physical memory reduction** demonstrated in the Buffer benchmark.
 
 
 ---
