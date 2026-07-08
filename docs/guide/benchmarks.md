@@ -57,14 +57,18 @@ We ran a benchmark simulating 1,000,000 operations under active memory allocatio
 
 ## 📊 Batch Operation Amortization (`mget`)
 
-To bypass the FFI crossing overhead for multi-key lookups, use the native `mget` method. This aggregates queries inside a single boundary crossing:
+To bypass the FFI crossing overhead for multi-key lookups, use the native `mget` method. This aggregates queries inside a single boundary crossing. The table below compares loop-based reads against the native `mget` batch read:
 
-| Batch Size | Loop JS lru-cache | Loop OffHeap (L2) | Batch OffHeap (mget) |
-| :--- | :--- | :--- | :--- |
-| **10** | 5 μs | 5 μs | **3 μs** (Faster than lru-cache loop!) |
-| **100** | 9 μs | 43 μs | **9 μs** (technical tie) |
-| **1000** | 79 μs | 654 μs | **108 μs** |
-| **5000** | 392 μs | 2.60 ms | **349 μs** (Faster than lru-cache loop!) |
+### 1. Batch Size: 100 Keys
+- **JS `lru-cache` (Loop)**: **2.0 μs** avg per batch
+- **OffHeap L2 (Loop)**: **26.0 μs** avg per batch
+- **OffHeap `mget` (Single FFI)**: **4.0 μs** avg per batch (Over **6.3x faster** than OffHeap loop!)
+
+### 2. Batch Size: 1000 Keys
+- **JS `lru-cache` (Loop)**: **23.1 μs** avg per batch
+- **OffHeap L2 (Loop)**: **278.3 μs** avg per batch
+- **OffHeap `mget` (Single FFI)**: **44.0 μs** avg per batch (Over **6.3x faster** than OffHeap loop!)
+
 
 ---
 
