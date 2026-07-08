@@ -1,6 +1,6 @@
 {
   "name": "offheap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance off-heap caching framework for Node.js written in Rust",
   "main": "index.js",
   "types": "index.d.ts",
