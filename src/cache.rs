@@ -176,7 +176,7 @@ impl Cache {
     }
 
     #[napi]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>) -> Result<JsUnknown> {
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>) -> Result<()> {
         let bytes = self.serialize_value(env, value)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         
@@ -184,12 +184,8 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
         
-        let old_bytes = cache.set(&key, bytes, ttl);
-        if let Some(bytes) = old_bytes {
-            self.deserialize_value(env, bytes)
-        } else {
-            Ok(env.get_undefined()?.into_unknown())
-        }
+        cache.set(&key, bytes, ttl);
+        Ok(())
     }
 
     #[napi]

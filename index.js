@@ -86,12 +86,14 @@ class Cache {
   }
 
   set(key, value, ttlMs) {
-    this._l1Set(key, value);
+    // Invalidate L1 to prevent stale data
+    this._l1.delete(key);
     const wrapped = wrapValue(value);
-    return unwrapValue(this._native.set(key, wrapped, ttlMs));
+    this._native.set(key, wrapped, ttlMs);
   }
 
   touch(key, ttlMs) {
+    this._l1.delete(key); // Invalidate L1 on TTL update
     return this._native.touch(key, ttlMs);
   }
 
@@ -121,15 +123,13 @@ class Cache {
   }
 
   increment(key, delta = 1, ttlMs) {
-    const val = this._native.increment(key, delta, ttlMs);
-    this._l1Set(key, val);
-    return val;
+    this._l1.delete(key); // Invalidate L1 on mutation
+    return this._native.increment(key, delta, ttlMs);
   }
 
   decrement(key, delta = 1, ttlMs) {
-    const val = this._native.decrement(key, delta, ttlMs);
-    this._l1Set(key, val);
-    return val;
+    this._l1.delete(key); // Invalidate L1 on mutation
+    return this._native.decrement(key, delta, ttlMs);
   }
 
   mget(keys) {
@@ -168,7 +168,7 @@ class Cache {
     const wrapped = {};
     for (const k in entries) {
       const val = entries[k];
-      this._l1Set(k, val);
+      this._l1.delete(k); // Invalidate L1
       wrapped[k] = wrapValue(val);
     }
     this._native.mset(wrapped, ttlMs);
