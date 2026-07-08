@@ -53,7 +53,8 @@ We ran a benchmark simulating 1,000,000 operations under active memory allocatio
 | **RSS Memory (End)** | 445.24 MB | 341.00 MB | Process RSS at 500k entries |
 | **RSS Memory Delta** | **359.69 MB** | **255.44 MB** | **OffHeap uses 104.25 MB less RSS (29% reduction)** |
 
-*   **Footprint Explanation**: OffHeap incorporates transparent native **LZ4 block compression** for serialized JSON values (via `lz4_flex`). Under clean isolated processes caching 500k JSON records, OffHeap uses only **255.44 MB** RSS Delta compared to JS `lru-cache`'s **359.69 MB** (a **29% reduction in physical RAM**).
+*   **Footprint Explanation**: OffHeap incorporates optional native **LZ4 block compression** for serialized JSON values (via `lz4_flex`). When compression is enabled (`compression: true`), OffHeap uses only **255.44 MB** RSS Delta compared to JS `lru-cache`'s **359.69 MB** (a **29% reduction in physical RAM**). By default, compression is disabled to guarantee peak raw throughput.
+
 
 
 ### 3. Binary Buffer Storage Memory Footprint (500k Keys, 500B Buffers)

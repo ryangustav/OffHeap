@@ -246,6 +246,7 @@ class CacheManager {
       capacity: config.capacity,
       shards: config.shards,
       maxBytes: config.maxBytes,
+      compression: config.compression,
     };
     const nativeCache = this._native.createCache(name, rawConfig);
     return new Cache(nativeCache, config);

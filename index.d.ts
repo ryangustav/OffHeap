@@ -4,6 +4,7 @@ export interface CacheConfig {
   shards?: number;
   maxBytes?: number;
   l1Capacity?: number;
+  compression?: boolean;
 }
 
 export interface CacheStats {

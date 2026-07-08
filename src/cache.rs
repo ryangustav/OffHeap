@@ -8,6 +8,7 @@ pub struct CacheConfig {
     pub capacity: u32,
     pub shards: Option<u32>,
     pub max_bytes: Option<f64>,
+    pub compression: Option<bool>,
 }
 
 #[napi(object)]
@@ -22,12 +23,14 @@ pub struct CacheStatsJs {
 #[napi]
 pub struct Cache {
     shards: Vec<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>>,
+    compression: bool,
 }
 
 impl Clone for Cache {
     fn clone(&self) -> Self {
         Self {
             shards: self.shards.clone(),
+            compression: self.compression,
         }
     }
 }
@@ -37,6 +40,7 @@ impl Cache {
         let capacity = config.capacity as usize;
         let shards_count = config.shards.unwrap_or(8).max(1) as usize;
         let policy_lower = config.policy.to_lowercase();
+        let compression = config.compression.unwrap_or(false);
         
         let shard_capacity = (capacity / shards_count).max(1);
         let shard_max_bytes = config.max_bytes.map(|mb| (mb as usize / shards_count).max(1));
@@ -51,7 +55,7 @@ impl Cache {
             shards.push(Arc::new(parking_lot::Mutex::new(Some(inner))));
         }
 
-        Self { shards }
+        Self { shards, compression }
     }
 
     fn get_shard(&self, key: &str) -> Result<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>> {
@@ -75,8 +79,12 @@ impl Cache {
             let slice = utf8.as_slice();
             if slice.starts_with(b"\0J") {
                 bytes.push(3); // Tag: JSON
-                let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
-                bytes.extend_from_slice(&compressed);
+                if self.compression {
+                    let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
+                    bytes.extend_from_slice(&compressed);
+                } else {
+                    bytes.extend_from_slice(&slice[2..]);
+                }
             } else {
                 bytes.push(2); // Tag: String
                 bytes.extend_from_slice(slice);
@@ -90,8 +98,12 @@ impl Cache {
             } else {
                 let s = val.to_string();
                 bytes.push(3); // Tag: JSON (float represented as string)
-                let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
-                bytes.extend_from_slice(&compressed);
+                if self.compression {
+                    let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
+                    bytes.extend_from_slice(&compressed);
+                } else {
+                    bytes.extend_from_slice(s.as_bytes());
+                }
             }
         } else {
             return Err(napi::Error::new(napi::Status::InvalidArg, "Complex types must be serialized to JSON in JS wrapper"));
@@ -117,14 +129,19 @@ impl Cache {
                 Ok(js_str.into_unknown())
             }
             3 => {
-                let decompressed = lz4_flex::decompress_size_prepended(payload)
-                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
-                let s = std::str::from_utf8(&decompressed)
-                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                let s = if self.compression {
+                    let decompressed = lz4_flex::decompress_size_prepended(payload)
+                        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
+                    std::str::from_utf8(&decompressed)
+                        .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?.to_string()
+                } else {
+                    std::str::from_utf8(payload)
+                        .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?.to_string()
+                };
                 let mut prefixed = String::with_capacity(2 + s.len());
                 prefixed.push('\0');
                 prefixed.push('J');
-                prefixed.push_str(s);
+                prefixed.push_str(&s);
                 let js_str = env.create_string(&prefixed)?;
                 Ok(js_str.into_unknown())
             }

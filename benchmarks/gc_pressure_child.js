@@ -73,7 +73,8 @@ async function run() {
       policy: 'lru',
       capacity: numKeys,
       shards: 16,
-      l1Capacity: 10000
+      l1Capacity: 10000,
+      compression: true
     });
     for (let i = 0; i < numKeys; i++) {
       cache.set(keys[i], getLargePayload(i));

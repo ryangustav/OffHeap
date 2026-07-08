@@ -262,3 +262,19 @@ test('Cache - Deterministic dispose()', () => {
     cache.get('a');
   }, /Cache has been disposed/);
 });
+
+test('Cache - Optional LZ4 Compression', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('lru-compressed', {
+    policy: 'lru',
+    capacity: 10,
+    compression: true
+  });
+
+  const obj = { message: 'hello with compression', values: [1, 2, 3] };
+  cache.set('key', obj);
+
+  assert.deepStrictEqual(cache.get('key'), obj);
+  cache.dispose();
+  manager.dispose();
+});
