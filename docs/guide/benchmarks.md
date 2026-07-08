@@ -55,6 +55,19 @@ We ran a benchmark simulating 1,000,000 operations under active memory allocatio
 
 *   **Footprint Explanation**: In clean, isolated OS processes, the memory footprint delta of `OffHeap` is **471.46 MB** compared to JS `lru-cache`'s **360.87 MB** (only a ~30% physical overhead to store 500k records off-heap, completely protecting the V8 heap from Stop-the-World pauses).
 
+### 3. Binary Buffer Storage Memory Footprint (500k Keys, 500B Buffers)
+
+When storing raw binary data (like Node.js `Buffer`s, Protocol Buffers, or MessagePack), OffHeap does not suffer from V8 object wrapper overhead or repeating JSON schema keys. In isolated process tests, OffHeap uses **88 MB less physical RAM** than JS `lru-cache`:
+
+| Metric | JS lru-cache (In-Heap) | OffHeap (L2 Native) | Difference |
+| :--- | :--- | :--- | :--- |
+| **Heap Usage (End)** | 145.95 MB | 23.25 MB | **122.7 MB less heap** |
+| **RSS Memory (Start)** | 84.91 MB | 84.56 MB | Clean start baseline |
+| **RSS Memory (End)** | 532.85 MB | 444.31 MB | Process RSS at end |
+| **RSS Memory Delta** | **447.94 MB** | **359.75 MB** | **OffHeap uses 88.19 MB less physical memory (20% reduction)** |
+
+*   **Why OffHeap Wins**: In JavaScript, storing a unique `Buffer` requires allocating a JS `Uint8Array` wrapper in the V8 heap (~100 bytes) along with V8 external backing store allocation overhead. OffHeap copies the raw bytes directly into contiguous native memory in Rust, bypassing JS object allocations entirely.
+
 ---
 
 ## 📊 Batch Operation Amortization (`mget`)
@@ -91,7 +104,7 @@ All benchmarks were run locally and are fully reproducible using the scripts in 
 
 > [!WARNING]
 > **FFI Boundary Overhead**
-> The communication between Node.js (V8) and Rust occurs via a Native Foreign Function Interface (FFI) boundary. Crossing this boundary, casting types, and copying bytes incurs a micro overhead of approximately **1.1 to 1.7 microseconds** per operation.
+> The communication between Node.js (V8) and Rust occurs via a Native Foreign Function Interface (FFI) boundary. Crossing this boundary, casting types, and copying bytes incurs a micro overhead of approximately **0.5 to 1.0 microseconds** per operation.
 > 
 > * **When NOT to use OffHeap**: If you are caching small amounts of data (under 50 MB) consisting of tiny objects, a pure JavaScript Map or simple JS LRU cache will be faster, as it runs entirely in the V8 heap without FFI crossings.
 > * **When to use OffHeap**: If your cache holds **gigabytes of data** or **millions of active keys** where Garbage Collection pauses dominate your application latency, OffHeap is highly superior. The micro FFI overhead is a tiny fraction of the latency saved by preventing major Stop-the-World GC sweeps and memory fragmentation.
