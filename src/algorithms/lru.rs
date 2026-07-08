@@ -10,6 +10,8 @@ struct LruNode {
 
 pub struct LruCache {
     capacity: usize,
+    max_bytes: Option<usize>,
+    bytes_used: usize,
     map: HashMap<String, usize>,
     nodes: Vec<LruNode>,
     free_nodes: Vec<usize>,
@@ -21,10 +23,16 @@ pub struct LruCache {
 
 impl LruCache {
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_max_bytes(capacity, None)
+    }
+
+    pub fn new_with_max_bytes(capacity: usize, max_bytes: Option<usize>) -> Self {
         Self {
             capacity,
-            map: HashMap::with_capacity(capacity),
-            nodes: Vec::with_capacity(capacity),
+            max_bytes,
+            bytes_used: 0,
+            map: HashMap::with_capacity(capacity.min(1024)),
+            nodes: Vec::with_capacity(capacity.min(1024)),
             free_nodes: Vec::new(),
             head: None,
             tail: None,
@@ -87,7 +95,8 @@ impl CacheImpl for LruCache {
     fn get(&mut self, key: &str) -> Option<Vec<u8>> {
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
-                self.remove_node(node_idx);
+                let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+                self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
                 self.misses += 1;
                 None
@@ -102,25 +111,61 @@ impl CacheImpl for LruCache {
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
+    fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
         if let Some(&node_idx) = self.map.get(key) {
-            // Key exists, update it
-            let old_value = std::mem::replace(
+            if self.nodes[node_idx].entry.is_expired() {
+                let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+                self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
+                self.map.remove(key);
+                self.misses += 1;
+                None
+            } else {
+                self.hits += 1;
+                Some(self.nodes[node_idx].entry.value.clone())
+            }
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    fn has(&mut self, key: &str) -> bool {
+        if let Some(&node_idx) = self.map.get(key) {
+            if self.nodes[node_idx].entry.is_expired() {
+                let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+                self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
+                self.map.remove(key);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
+        let new_bytes = key.len() + value.len();
+        let mut old_value = None;
+
+        if let Some(&node_idx) = self.map.get(key) {
+            let old_entry = std::mem::replace(
                 &mut self.nodes[node_idx].entry,
                 CacheEntry::new(value, ttl_ms),
-            ).value;
+            );
+            let old_bytes = key.len() + old_entry.value.len();
+            self.bytes_used = self.bytes_used + new_bytes - old_bytes;
             self.move_to_head(node_idx);
-            Some(old_value)
+            old_value = Some(old_entry.value);
         } else {
-            // If full, evict the LRU (tail)
             if self.map.len() >= self.capacity && self.capacity > 0 {
                 if let Some(t_idx) = self.tail {
-                    let (evicted_key, _) = self.remove_node(t_idx);
+                    let (evicted_key, evicted_entry) = self.remove_node(t_idx);
+                    self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                     self.map.remove(&evicted_key);
                 }
             }
 
-            // Insert new entry
             let node_idx = if let Some(idx) = self.free_nodes.pop() {
                 self.nodes[idx].key = key.to_string();
                 self.nodes[idx].entry = CacheEntry::new(value, ttl_ms);
@@ -136,15 +181,50 @@ impl CacheImpl for LruCache {
                 idx
             };
 
+            self.bytes_used += new_bytes;
             self.attach_to_head(node_idx);
             self.map.insert(key.to_string(), node_idx);
-            None
+        }
+
+        if let Some(max) = self.max_bytes {
+            while self.bytes_used > max && !self.map.is_empty() {
+                if let Some(t_idx) = self.tail {
+                    let (evicted_key, evicted_entry) = self.remove_node(t_idx);
+                    self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
+                    self.map.remove(&evicted_key);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        old_value
+    }
+
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
+        if let Some(&node_idx) = self.map.get(key) {
+            if self.nodes[node_idx].entry.is_expired() {
+                let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+                self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
+                self.map.remove(key);
+                false
+            } else {
+                self.nodes[node_idx].entry = CacheEntry::new(
+                    self.nodes[node_idx].entry.value.clone(),
+                    ttl_ms,
+                );
+                self.move_to_head(node_idx);
+                true
+            }
+        } else {
+            false
         }
     }
 
     fn delete(&mut self, key: &str) -> bool {
         if let Some(&node_idx) = self.map.get(key) {
-            self.remove_node(node_idx);
+            let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+            self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
             self.map.remove(key);
             true
         } else {
@@ -160,6 +240,7 @@ impl CacheImpl for LruCache {
         self.tail = None;
         self.hits = 0;
         self.misses = 0;
+        self.bytes_used = 0;
     }
 
     fn stats(&self) -> CacheStats {
@@ -168,6 +249,7 @@ impl CacheImpl for LruCache {
             misses: self.misses,
             capacity: self.capacity,
             size: self.map.len(),
+            bytes_used: self.bytes_used,
         }
     }
 
