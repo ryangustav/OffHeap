@@ -23,7 +23,7 @@ test('CacheManager - isolated caches', () => {
 
 test('Cache - DataType Preservation (String, Buffer, JSON Object)', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-types', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-types', { policy: 'lru', capacity: 10, shards: 1 });
 
   // String
   cache.set('str', 'hello world');
@@ -103,7 +103,7 @@ test('Cache Policies - W-TinyLFU eviction competition', () => {
 
 test('Cache - TTL (Time To Live)', async () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-ttl', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-ttl', { policy: 'lru', capacity: 10, shards: 1 });
 
   cache.set('short-lived', 'expire-me', 10); // 10ms TTL
   cache.set('long-lived', 'keep-me', 1000);   // 1000ms TTL
@@ -120,7 +120,7 @@ test('Cache - TTL (Time To Live)', async () => {
 
 test('Cache - keys() and delete()', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-ops', { policy: 'lru', capacity: 5 });
+  const cache = manager.createCache('lru-ops', { policy: 'lru', capacity: 5, shards: 1 });
 
   cache.set('a', 1);
   cache.set('b', 2);
@@ -136,7 +136,7 @@ test('Cache - keys() and delete()', () => {
 
 test('Cache - touch(key, ttl)', async () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-touch', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-touch', { policy: 'lru', capacity: 10, shards: 1 });
 
   cache.set('a', 'value', 15); // 15ms TTL
   assert.strictEqual(cache.touch('a', 1000), true); // Extend to 1000ms
@@ -150,7 +150,7 @@ test('Cache - touch(key, ttl)', async () => {
 
 test('Cache - Atomic Counters (increment / decrement)', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-counters', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-counters', { policy: 'lru', capacity: 10, shards: 1 });
 
   // Init and increment
   assert.strictEqual(cache.increment('counter', 5), 5);
@@ -165,7 +165,7 @@ test('Cache - Atomic Counters (increment / decrement)', () => {
 
 test('Cache - Batch Operations (mget / mset / mdelete)', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-batch', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-batch', { policy: 'lru', capacity: 10, shards: 1 });
 
   // mset
   cache.mset({ a: 1, b: 'hello', c: { x: 9 } });
@@ -205,7 +205,7 @@ test('Cache - has() and peek()', () => {
 
 test('Cache - getOrSet() Coalescing', async () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-getorset', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-getorset', { policy: 'lru', capacity: 10, shards: 1 });
 
   let calls = 0;
   const factory = () => {
@@ -253,7 +253,7 @@ test('Cache - maxBytes Memory Eviction Limit', () => {
 
 test('Cache - Deterministic dispose()', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-dispose', { policy: 'lru', capacity: 10 });
+  const cache = manager.createCache('lru-dispose', { policy: 'lru', capacity: 10, shards: 1 });
 
   cache.set('a', 1);
   cache.dispose();
@@ -268,7 +268,8 @@ test('Cache - Optional LZ4 Compression', () => {
   const cache = manager.createCache('lru-compressed', {
     policy: 'lru',
     capacity: 10,
-    compression: true
+    compression: true,
+    shards: 1
   });
 
   const obj = { message: 'hello with compression', values: [1, 2, 3] };
@@ -457,13 +458,100 @@ test('Cache Policies - W-TinyLFU Eviction Memory Leak Protection', () => {
   manager.dispose();
 });
 
-test('Panic Safety - Rust Panics do not crash Node.js process', () => {
+test('Panic Safety - Rust Panics do not crash Node.js process and poison cleanly', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('panic-test', { capacity: 10 });
+  const cache = manager.createCache('panic-test', { capacity: 10, shards: 8 });
+
+  // 1. Force a panic during a locked operation on "key-0"
+  assert.throws(() => {
+    cache._native.testPanic("key-0");
+  }, /Intended test panic in Rust code!/);
+
+  // 2. Future operations on keys mapping to that same poisoned shard must fail with a clear exception
+  assert.throws(() => {
+    cache.set("key-0", "val");
+  }, /Cache has been disposed/);
+
+  // 3. Keys mapping to different shards must continue to work perfectly without issue (isolation)
+  let worksOnOtherShard = false;
+  for (let i = 1; i < 100; i++) {
+    try {
+      cache.set(`key-${i}`, "val");
+      assert.strictEqual(cache.get(`key-${i}`), "val");
+      worksOnOtherShard = true;
+      break;
+    } catch (e) {
+      // Hashed to the same poisoned shard, skip and try next
+    }
+  }
+  assert.ok(worksOnOtherShard, "Unpoisoned shards should remain fully functional");
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Security - LZ4 Decompression size safety limit protection', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('decomp-limit-test', { capacity: 10 });
+
+  // Construct a raw buffer payload:
+  // - Byte 0: Tag 5 (LZ4)
+  // - Bytes 1-4: 100 MB uncompressed size prefix (104,857,600 bytes = little-endian [0x00, 0x00, 0x40, 0x06])
+  // - Bytes 5..: Dummy payload bytes
+  const malformedPayload = [
+    5,                      // Tag 5
+    0x00, 0x00, 0x40, 0x06, // 100 MB size prefix
+    0x12, 0x34              // Dummy bytes
+  ];
 
   assert.throws(() => {
-    cache._native.testPanic();
-  }, /Intended test panic in Rust code!/);
+    cache._native.testDeserializeRaw(malformedPayload);
+  }, /exceeds safety limit/);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Security - LZ4 Decompression size safety limit scales dynamically with maxBytes', () => {
+  const manager = new CacheManager();
+  // maxBytes is 10 KB, so limit scales down to 10% = 1 KB (1000 bytes)
+  const cache = manager.createCache('decomp-limit-scale-test', { 
+    capacity: 10,
+    maxBytes: 10000
+  });
+
+  // Construct a payload:
+  // - Byte 0: Tag 5 (LZ4)
+  // - Bytes 1-4: 2 KB uncompressed size prefix (2048 bytes = little-endian [0x00, 0x08, 0x00, 0x00])
+  // - Bytes 5..: Dummy payload bytes
+  const malformedPayload = [
+    5,                      // Tag 5
+    0x00, 0x08, 0x00, 0x00, // 2 KB (2048) size prefix
+    0x12, 0x34              // Dummy bytes
+  ];
+
+  assert.throws(() => {
+    cache._native.testDeserializeRaw(malformedPayload);
+  }, /exceeds safety limit of 1024 bytes/);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Security - Key length safety limit and type validation', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('key-safety-test', { capacity: 10 });
+
+  // 1. Key must be a string
+  assert.throws(() => {
+    cache.get(123);
+  }, TypeError, /Key must be a string/);
+
+  // 2. Key must not exceed 8192 characters
+  const longKey = 'a'.repeat(8193);
+  assert.throws(() => {
+    cache.get(longKey);
+  }, RangeError, /Key length exceeds safety limit of 8192 characters/);
 
   cache.dispose();
   manager.dispose();
