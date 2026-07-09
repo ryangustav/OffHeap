@@ -8,6 +8,7 @@ pub struct CacheConfig {
     pub capacity: u32,
     pub shards: Option<u32>,
     pub max_bytes: Option<f64>,
+    pub compression: Option<bool>,
 }
 
 #[napi(object)]
@@ -22,12 +23,14 @@ pub struct CacheStatsJs {
 #[napi]
 pub struct Cache {
     shards: Vec<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>>,
+    compression: bool,
 }
 
 impl Clone for Cache {
     fn clone(&self) -> Self {
         Self {
             shards: self.shards.clone(),
+            compression: self.compression,
         }
     }
 }
@@ -37,6 +40,7 @@ impl Cache {
         let capacity = config.capacity as usize;
         let shards_count = config.shards.unwrap_or(8).max(1) as usize;
         let policy_lower = config.policy.to_lowercase();
+        let compression = config.compression.unwrap_or(false);
         
         let shard_capacity = (capacity / shards_count).max(1);
         let shard_max_bytes = config.max_bytes.map(|mb| (mb as usize / shards_count).max(1));
@@ -51,7 +55,7 @@ impl Cache {
             shards.push(Arc::new(parking_lot::Mutex::new(Some(inner))));
         }
 
-        Self { shards }
+        Self { shards, compression }
     }
 
     fn get_shard(&self, key: &str) -> Result<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>> {
@@ -60,7 +64,31 @@ impl Cache {
         Ok(Arc::clone(&self.shards[idx]))
     }
 
-    fn serialize_value(&self, env: Env, value: JsUnknown) -> Result<Vec<u8>> {
+    /// ========================================================================
+    /// 📂 SERIALIZATION TAG REGISTRY
+    /// ========================================================================
+    /// Every entry written off-heap is prefixed with a 1-byte protocol header
+    /// (Tag) that determines how the trailing slice payload is deserialized:
+    ///
+    ///   🏷️ CATEGORY RANGES:
+    ///     [1 - 20]   : Core payload datatypes & baseline formats
+    ///     [21 - 90]  : Reserved for future structured formats (e.g., MsgPack, Protobuf)
+    ///     [91 - 99]  : Reserved for internal testing, diagnostics, & custom overrides
+    ///
+    ///   📌 TAGS IN USE:
+    ///     Tag 1:  Raw Binary Buffer (Stored contiguously in native memory)
+    ///     Tag 2:  Raw UTF-8 String (Decoded directly into v8::String)
+    ///     Tag 3:  Raw JSON String (Raw text JSON representation of JS objects)
+    ///     Tag 4:  Atomic Counter (64-bit signed integer representation)
+    ///     Tag 5:  LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///     Tag 99: Test Sentinel (Reserved for diagnostic tests, do not use in production)
+    ///
+    /// When expanding types:
+    ///   1. Register the tag code here following the range guidelines above.
+    ///   2. Handle serialization tag routing in `serialize_value`.
+    ///   3. Implement safety catches for new tags in `deserialize_value`.
+    /// ========================================================================
+    fn serialize_value(&self, _env: Env, value: JsUnknown, force_compression: Option<bool>) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let value_type = value.get_type()?;
 
@@ -72,8 +100,21 @@ impl Cache {
         } else if value_type == ValueType::String {
             let js_str = JsString::try_from(value)?;
             let utf8 = js_str.into_utf8()?;
-            bytes.push(2); // Tag: String
-            bytes.extend_from_slice(utf8.as_slice());
+            let slice = utf8.as_slice();
+            if slice.starts_with(b"\0J") {
+                let compress = force_compression.unwrap_or(self.compression);
+                if compress {
+                    bytes.push(5); // Tag: Compressed JSON
+                    let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
+                    bytes.extend_from_slice(&compressed);
+                } else {
+                    bytes.push(3); // Tag: JSON (Raw)
+                    bytes.extend_from_slice(&slice[2..]);
+                }
+            } else {
+                bytes.push(2); // Tag: String
+                bytes.extend_from_slice(slice);
+            }
         } else if value_type == ValueType::Number {
             let num = value.coerce_to_number()?;
             let val = num.get_double()?;
@@ -81,18 +122,19 @@ impl Cache {
                 bytes.push(4); // Tag: i64
                 bytes.extend_from_slice(&(val as i64).to_ne_bytes());
             } else {
-                let json_val = serde_json::Value::Number(serde_json::Number::from_f64(val).unwrap());
-                let serialized = serde_json::to_vec(&json_val)
-                    .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                bytes.push(3); // Tag: JSON
-                bytes.extend_from_slice(&serialized);
+                let s = val.to_string();
+                let compress = force_compression.unwrap_or(self.compression);
+                if compress {
+                    bytes.push(5); // Tag: Compressed JSON
+                    let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
+                    bytes.extend_from_slice(&compressed);
+                } else {
+                    bytes.push(3); // Tag: JSON (Raw)
+                    bytes.extend_from_slice(s.as_bytes());
+                }
             }
         } else {
-            let json_val: serde_json::Value = env.from_js_value(value)?;
-            let serialized = serde_json::to_vec(&json_val)
-                .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-            bytes.push(3); // Tag: JSON
-            bytes.extend_from_slice(&serialized);
+            return Err(napi::Error::new(napi::Status::InvalidArg, "Complex types must be serialized to JSON in JS wrapper"));
         }
         Ok(bytes)
     }
@@ -115,10 +157,14 @@ impl Cache {
                 Ok(js_str.into_unknown())
             }
             3 => {
-                let json_val: serde_json::Value = serde_json::from_slice(payload)
-                    .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                let parsed = env.to_js_value(&json_val)?;
-                Ok(parsed)
+                let s = std::str::from_utf8(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                let mut prefixed = String::with_capacity(2 + s.len());
+                prefixed.push('\0');
+                prefixed.push('J');
+                prefixed.push_str(s);
+                let js_str = env.create_string(&prefixed)?;
+                Ok(js_str.into_unknown())
             }
             4 => {
                 if payload.len() == 8 {
@@ -128,6 +174,18 @@ impl Cache {
                 } else {
                     Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted"))
                 }
+            }
+            5 => {
+                let decompressed = lz4_flex::decompress_size_prepended(payload)
+                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
+                let s = std::str::from_utf8(&decompressed)
+                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                let mut prefixed = String::with_capacity(2 + s.len());
+                prefixed.push('\0');
+                prefixed.push('J');
+                prefixed.push_str(s);
+                let js_str = env.create_string(&prefixed)?;
+                Ok(js_str.into_unknown())
             }
             _ => Err(napi::Error::new(napi::Status::InvalidArg, "Invalid data type tag in cache storage")),
         }
@@ -171,20 +229,16 @@ impl Cache {
     }
 
     #[napi]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>) -> Result<JsUnknown> {
-        let bytes = self.serialize_value(env, value)?;
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
+        let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
         
-        let old_bytes = cache.set(&key, bytes, ttl);
-        if let Some(bytes) = old_bytes {
-            self.deserialize_value(env, bytes)
-        } else {
-            Ok(env.get_undefined()?.into_unknown())
-        }
+        cache.set(&key, bytes, ttl);
+        Ok(())
     }
 
     #[napi]
@@ -283,10 +337,10 @@ impl Cache {
                         }
                     }
                     3 => {
-                        let json_val: serde_json::Value = serde_json::from_slice(payload)
-                            .map_err(|e| napi::Error::new(napi::Status::InvalidArg, e.to_string()))?;
-                        if let Some(n) = json_val.as_i64() {
-                            current_val = n;
+                        let s = std::str::from_utf8(payload)
+                            .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                        if let Ok(val) = s.parse::<i64>() {
+                            current_val = val;
                         } else {
                             return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a valid 64-bit integer"));
                         }
@@ -314,8 +368,8 @@ impl Cache {
     }
 
     #[napi]
-    pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<JsObject> {
-        let mut result_obj = env.create_object()?;
+    pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<Vec<JsUnknown>> {
+        let mut result = Vec::with_capacity(keys.len());
         for key in keys {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
@@ -323,10 +377,12 @@ impl Cache {
             
             if let Some(bytes) = cache.get(&key) {
                 let val = self.deserialize_value(env, bytes)?;
-                result_obj.set(&key, val)?;
+                result.push(val);
+            } else {
+                result.push(env.get_undefined()?.into_unknown());
             }
         }
-        Ok(result_obj)
+        Ok(result)
     }
 
     #[napi]
@@ -341,7 +397,7 @@ impl Cache {
             let key = key_str.into_utf8()?.into_owned()?;
             
             let val: JsUnknown = entries.get_named_property(&key)?;
-            let bytes = self.serialize_value(env, val)?;
+            let bytes = self.serialize_value(env, val, None)?;
             
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
@@ -363,5 +419,10 @@ impl Cache {
             }
         }
         Ok(count)
+    }
+
+    #[napi]
+    pub fn test_deserialize_raw(&self, env: Env, bytes: Vec<u8>) -> Result<JsUnknown> {
+        self.deserialize_value(env, bytes)
     }
 }
