@@ -456,3 +456,15 @@ test('Cache Policies - W-TinyLFU Eviction Memory Leak Protection', () => {
   cache.dispose();
   manager.dispose();
 });
+
+test('Panic Safety - Rust Panics do not crash Node.js process', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('panic-test', { capacity: 10 });
+
+  assert.throws(() => {
+    cache._native.testPanic();
+  }, /Intended test panic in Rust code!/);
+
+  cache.dispose();
+  manager.dispose();
+});

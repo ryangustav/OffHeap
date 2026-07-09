@@ -194,7 +194,7 @@ impl Cache {
 
 #[napi]
 impl Cache {
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn get(&self, env: Env, key: String) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -207,7 +207,7 @@ impl Cache {
         }
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn peek(&self, env: Env, key: String) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -220,7 +220,7 @@ impl Cache {
         }
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn has(&self, key: String) -> Result<bool> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -228,7 +228,7 @@ impl Cache {
         Ok(cache.has(&key))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
@@ -241,7 +241,7 @@ impl Cache {
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn touch(&self, key: String, ttl_ms: Option<f64>) -> Result<bool> {
         let ttl = ttl_ms.map(|ms| ms as u64);
         let shard_lock = self.get_shard(&key)?;
@@ -250,7 +250,7 @@ impl Cache {
         Ok(cache.touch(&key, ttl))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn delete(&self, key: String) -> Result<bool> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -258,7 +258,7 @@ impl Cache {
         Ok(cache.delete(&key))
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn clear(&self) -> Result<()> {
         for shard_lock in &self.shards {
             let mut lock = shard_lock.lock();
@@ -268,7 +268,7 @@ impl Cache {
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn stats(&self) -> Result<CacheStatsJs> {
         let mut total_hits = 0.0;
         let mut total_misses = 0.0;
@@ -296,7 +296,7 @@ impl Cache {
         })
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn keys(&self) -> Result<Vec<String>> {
         let mut all_keys = Vec::new();
         for shard_lock in &self.shards {
@@ -307,7 +307,7 @@ impl Cache {
         Ok(all_keys)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn dispose(&self) -> Result<()> {
         for shard_lock in &self.shards {
             let mut lock = shard_lock.lock();
@@ -316,7 +316,7 @@ impl Cache {
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn increment(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -362,12 +362,12 @@ impl Cache {
         Ok(js_num.into_unknown())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn decrement(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         self.increment(env, key, -delta, ttl_ms)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<Vec<JsUnknown>> {
         let mut result = Vec::with_capacity(keys.len());
         for key in keys {
@@ -385,7 +385,7 @@ impl Cache {
         Ok(result)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<()> {
         let keys_array = entries.get_property_names()?;
         let len = keys_array.get_array_length()?;
@@ -407,7 +407,7 @@ impl Cache {
         Ok(())
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn mdelete(&self, keys: Vec<String>) -> Result<u32> {
         let mut count = 0;
         for key in keys {
@@ -421,8 +421,13 @@ impl Cache {
         Ok(count)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn test_deserialize_raw(&self, env: Env, bytes: Vec<u8>) -> Result<JsUnknown> {
         self.deserialize_value(env, bytes)
+    }
+
+    #[napi(catch_unwind)]
+    pub fn test_panic(&self) {
+        panic!("Intended test panic in Rust code!");
     }
 }
