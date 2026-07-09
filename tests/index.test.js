@@ -488,3 +488,25 @@ test('Panic Safety - Rust Panics do not crash Node.js process and poison cleanly
   cache.dispose();
   manager.dispose();
 });
+
+test('Security - LZ4 Decompression size safety limit protection', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('decomp-limit-test', { capacity: 10 });
+
+  // Construct a raw buffer payload:
+  // - Byte 0: Tag 5 (LZ4)
+  // - Bytes 1-4: 100 MB uncompressed size prefix (104,857,600 bytes = little-endian [0x00, 0x00, 0x40, 0x06])
+  // - Bytes 5..: Dummy payload bytes
+  const malformedPayload = [
+    5,                      // Tag 5
+    0x00, 0x00, 0x40, 0x06, // 100 MB size prefix
+    0x12, 0x34              // Dummy bytes
+  ];
+
+  assert.throws(() => {
+    cache._native.testDeserializeRaw(malformedPayload);
+  }, /exceeds safety limit/);
+
+  cache.dispose();
+  manager.dispose();
+});

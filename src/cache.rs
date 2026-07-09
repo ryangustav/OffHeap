@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use napi::{Env, JsUnknown, JsBuffer, JsString, JsObject, Result, ValueType};
 use super::algorithms::{CacheImpl, lru::LruCache, arc::ArcCache, tinylfu::TinyLfuCache};
+use rand::Rng;
 
 #[napi(object)]
 pub struct CacheConfig {
@@ -24,6 +25,7 @@ pub struct CacheStatsJs {
 pub struct Cache {
     shards: Vec<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>>,
     compression: bool,
+    seed: usize,
 }
 
 impl Clone for Cache {
@@ -31,6 +33,7 @@ impl Clone for Cache {
         Self {
             shards: self.shards.clone(),
             compression: self.compression,
+            seed: self.seed,
         }
     }
 }
@@ -55,11 +58,13 @@ impl Cache {
             shards.push(Arc::new(parking_lot::Mutex::new(Some(inner))));
         }
 
-        Self { shards, compression }
+        let seed = rand::thread_rng().gen::<usize>();
+
+        Self { shards, compression, seed }
     }
 
     fn get_shard(&self, key: &str) -> Result<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>> {
-        let hash = seahash::hash(key.as_bytes()) as usize;
+        let hash = seahash::hash(key.as_bytes()) as usize ^ self.seed;
         let idx = hash % self.shards.len();
         Ok(Arc::clone(&self.shards[idx]))
     }
@@ -176,8 +181,24 @@ impl Cache {
                 }
             }
             5 => {
-                let decompressed = lz4_flex::decompress_size_prepended(payload)
+                if payload.len() < 4 {
+                    return Err(napi::Error::new(napi::Status::InvalidArg, "Compressed payload is too short"));
+                }
+                let uncompressed_size = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+                
+                // Enforce safety limit of 32 MB to prevent decompression bombs and OOM allocation panics
+                let limit = 32 * 1024 * 1024;
+                if uncompressed_size > limit {
+                    return Err(napi::Error::new(
+                        napi::Status::InvalidArg,
+                        format!("Decompressed size {} exceeds safety limit of {} bytes", uncompressed_size, limit)
+                    ));
+                }
+                
+                let mut decompressed = vec![0u8; uncompressed_size];
+                lz4_flex::block::decompress_into(&payload[4..], &mut decompressed)
                     .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
+                
                 let s = std::str::from_utf8(&decompressed)
                     .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
                 let mut prefixed = String::with_capacity(2 + s.len());
