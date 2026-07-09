@@ -44,8 +44,8 @@ test('Cache - DataType Preservation (String, Buffer, JSON Object)', () => {
 
 test('Cache Policies - LRU eviction', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 3
-  const cache = manager.createCache('lru-evict', { policy: 'lru', capacity: 3, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 3
+  const cache = manager.createCache('lru-evict', { policy: 'lru', capacity: 3, shards: 1, l1Capacity: 0 });
 
   cache.set('a', 1);
   cache.set('b', 2);
@@ -65,8 +65,8 @@ test('Cache Policies - LRU eviction', () => {
 
 test('Cache Policies - ARC adaptation & eviction', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 4
-  const cache = manager.createCache('arc-evict', { policy: 'arc', capacity: 4, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 4
+  const cache = manager.createCache('arc-evict', { policy: 'arc', capacity: 4, shards: 1, l1Capacity: 0 });
 
   // Warm up ARC
   cache.set('a', 1);
@@ -88,8 +88,8 @@ test('Cache Policies - ARC adaptation & eviction', () => {
 
 test('Cache Policies - W-TinyLFU eviction competition', () => {
   const manager = new CacheManager();
-  // Set shards: 1 to ensure a single eviction pool of size 10
-  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1 });
+  // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 10
+  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
 
   // Fill cache
   for (let i = 0; i < 12; i++) {
@@ -186,7 +186,8 @@ test('Cache - Batch Operations (mget / mset / mdelete)', () => {
 
 test('Cache - has() and peek()', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('lru-has-peek', { policy: 'lru', capacity: 3, shards: 1 });
+  // Set l1Capacity: 0 to ensure we directly verify native peek & LRU updating
+  const cache = manager.createCache('lru-has-peek', { policy: 'lru', capacity: 3, shards: 1, l1Capacity: 0 });
 
   cache.set('a', 1);
   cache.set('b', 2);
@@ -227,12 +228,13 @@ test('Cache - getOrSet() Coalescing', async () => {
 
 test('Cache - maxBytes Memory Eviction Limit', () => {
   const manager = new CacheManager();
-  // Set capacity = 100, shards = 1, but maxBytes = 35.
+  // Set capacity = 100, shards = 1, l1Capacity = 0, but maxBytes = 35.
   const cache = manager.createCache('lru-bytes', {
     policy: 'lru',
     capacity: 100,
     maxBytes: 35,
-    shards: 1
+    shards: 1,
+    l1Capacity: 0
   });
 
   cache.set('k1', '1234567890'); // key len 2 + value len 10 = 12 bytes + 1 tag = 13 bytes.
@@ -259,4 +261,198 @@ test('Cache - Deterministic dispose()', () => {
   assert.throws(() => {
     cache.get('a');
   }, /Cache has been disposed/);
+});
+
+test('Cache - Optional LZ4 Compression', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('lru-compressed', {
+    policy: 'lru',
+    capacity: 10,
+    compression: true
+  });
+
+  const obj = { message: 'hello with compression', values: [1, 2, 3] };
+  cache.set('key', obj);
+
+  assert.deepStrictEqual(cache.get('key'), obj);
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache - Three-layered Config & Overrides', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 100 },
+    l1: { enabled: true, capacity: 5 },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache1 = manager.createCache('test-override-1', {
+    compression: { enabled: false }
+  });
+
+  const cache2 = manager.createCache('test-override-2');
+
+  const smallObj = { val: 'small' };
+  const largeObj = { val: 'a'.repeat(200) };
+
+  // cache1 has compression disabled, so it shouldn't compress even large objects
+  cache1.set('k1', largeObj);
+  assert.deepStrictEqual(cache1.get('k1'), largeObj);
+
+  // cache2 has compression enabled (inherited), but k2 is small (<100 bytes) so it won't compress
+  cache2.set('k2', smallObj);
+  assert.deepStrictEqual(cache2.get('k2'), smallObj);
+
+  // cache2: k3 is large (>=100 bytes) so it will compress
+  cache2.set('k3', largeObj);
+  assert.deepStrictEqual(cache2.get('k3'), largeObj);
+
+  // cache2: k4 is large, but operation override disables compression
+  cache2.set('k4', largeObj, { compression: false });
+  assert.deepStrictEqual(cache2.get('k4'), largeObj);
+
+  cache1.dispose();
+  cache2.dispose();
+  manager.dispose();
+});
+
+test('Cache - Advanced Compression Matrices, Inheritances, Boundaries & Safety', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 100 },
+    eviction: { policy: 'lru', capacity: 100 }
+  });
+
+  const cache = manager.createCache('compat-advanced');
+
+  const createJsonOfSize = (size) => {
+    // base structure: {"d":""} is 8 bytes
+    const padLength = size - 8;
+    return { d: 'a'.repeat(padLength) };
+  };
+
+  const obj99 = createJsonOfSize(99);
+  const obj100 = createJsonOfSize(100);
+  const obj101 = createJsonOfSize(101);
+
+  cache.set('key99', obj99);
+  cache.set('key100', obj100);
+  cache.set('key101', obj101);
+
+  assert.deepStrictEqual(cache.get('key99'), obj99);
+  assert.deepStrictEqual(cache.get('key100'), obj100);
+  assert.deepStrictEqual(cache.get('key101'), obj101);
+
+  // Mixed compression mget batch test
+  const batchRes = cache.mget(['key99', 'key100', 'key101']);
+  assert.deepStrictEqual(batchRes, {
+    key99: obj99,
+    key100: obj100,
+    key101: obj101
+  });
+
+  // Unknown tag compatibility / safety
+  assert.throws(() => {
+    cache._native.testDeserializeRaw([99, 1, 2, 3]);
+  }, /Invalid data type tag in cache storage/);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache - Read/Write Config Change Isolation', () => {
+  const manager = new CacheManager({
+    compression: { enabled: true, minSizeBytes: 10 },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache = manager.createCache('change-isolation-cache');
+  const payload = { test: 'value_to_compress' };
+
+  cache.set('item', payload);
+
+  // Dynamically disable compression
+  cache._config.compression.enabled = false;
+
+  // Reading must still deserialize correctly because Tag 5 is self-describing
+  assert.deepStrictEqual(cache.get('item'), payload);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache - Reverse Tag Change Isolation', () => {
+  const manager = new CacheManager({
+    compression: { enabled: false },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache = manager.createCache('reverse-isolation-cache');
+  const payload = { test: 'value_uncompressed' };
+
+  // Stored with Tag 3 (raw JSON)
+  cache.set('item', payload);
+
+  // Dynamically enable compression on the config object
+  cache._config.compression.enabled = true;
+  cache._config.compression.minSizeBytes = 5;
+
+  // Reading must still deserialize correctly because Tag 3 is self-describing
+  assert.deepStrictEqual(cache.get('item'), payload);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Performance Regression - Fast Path Throughput', () => {
+  const manager = new CacheManager({
+    eviction: { capacity: 10000 }
+  });
+  const cache = manager.createCache('perf-test');
+
+  const start = performance.now();
+  const iterations = 30000;
+  for (let i = 0; i < iterations; i++) {
+    cache.set(`key-${i}`, { id: i });
+  }
+  const duration = performance.now() - start;
+  const opsSec = (iterations / duration) * 1000;
+
+  // The default fast-path should comfortably do at least 150k ops/sec even in loaded test environments
+  assert.ok(opsSec > 150000, `Default fast-path throughput degraded! Measured: ${Math.round(opsSec)} ops/sec`);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache Policies - W-TinyLFU Eviction Memory Leak Protection', () => {
+  const manager = new CacheManager();
+  const capacity = 100;
+  
+  const cache = manager.createCache('tinylfu-leak-test', {
+    policy: 'tinylfu',
+    capacity,
+    shards: 1, // Single shard for deterministic sizing behavior
+    l1Capacity: 0
+  });
+
+  // Write way more items than the cache capacity to trigger evictions
+  for (let i = 0; i < 1000; i++) {
+    cache.set(`key-${i}`, `val-${i}`);
+  }
+
+  // 1. Verify stats size matches capacity boundaries
+  const stats = cache.stats();
+  assert.ok(stats.size <= capacity, `Cache size exceeded capacity! Size: ${stats.size}`);
+
+  // 2. Black-box leak check: query every key to confirm only <= capacity keys are readable/present
+  let readableKeysCount = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (cache.get(`key-${i}`) !== undefined) {
+      readableKeysCount++;
+    }
+  }
+  assert.ok(readableKeysCount <= capacity, `Leaked keys are readable! Count: ${readableKeysCount}`);
+
+  cache.dispose();
+  manager.dispose();
 });
