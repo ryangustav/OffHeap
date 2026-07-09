@@ -198,34 +198,40 @@ impl Cache {
     pub fn get(&self, env: Env, key: String) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        if let Some(bytes) = cache.get(&key) {
+        let res = if let Some(bytes) = cache.get(&key) {
             self.deserialize_value(env, bytes)
         } else {
             Ok(env.get_undefined()?.into_unknown())
-        }
+        };
+        *lock = Some(cache);
+        res
     }
 
     #[napi(catch_unwind)]
     pub fn peek(&self, env: Env, key: String) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        if let Some(bytes) = cache.peek(&key) {
+        let res = if let Some(bytes) = cache.peek(&key) {
             self.deserialize_value(env, bytes)
         } else {
             Ok(env.get_undefined()?.into_unknown())
-        }
+        };
+        *lock = Some(cache);
+        res
     }
 
     #[napi(catch_unwind)]
     pub fn has(&self, key: String) -> Result<bool> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
-        Ok(cache.has(&key))
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
+        let res = cache.has(&key);
+        *lock = Some(cache);
+        Ok(res)
     }
 
     #[napi(catch_unwind)]
@@ -235,9 +241,9 @@ impl Cache {
         
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
-        
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         cache.set(&key, bytes, ttl);
+        *lock = Some(cache);
         Ok(())
     }
 
@@ -246,24 +252,29 @@ impl Cache {
         let ttl = ttl_ms.map(|ms| ms as u64);
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
-        Ok(cache.touch(&key, ttl))
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
+        let res = cache.touch(&key, ttl);
+        *lock = Some(cache);
+        Ok(res)
     }
 
     #[napi(catch_unwind)]
     pub fn delete(&self, key: String) -> Result<bool> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
-        Ok(cache.delete(&key))
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
+        let res = cache.delete(&key);
+        *lock = Some(cache);
+        Ok(res)
     }
 
     #[napi(catch_unwind)]
     pub fn clear(&self) -> Result<()> {
         for shard_lock in &self.shards {
             let mut lock = shard_lock.lock();
-            let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+            let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             cache.clear();
+            *lock = Some(cache);
         }
         Ok(())
     }
@@ -278,7 +289,7 @@ impl Cache {
         
         for shard_lock in &self.shards {
             let lock = shard_lock.lock();
-            let cache = lock.as_ref().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+            let cache = lock.as_ref().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             let stats = cache.stats();
             total_hits += stats.hits as f64;
             total_misses += stats.misses as f64;
@@ -301,7 +312,7 @@ impl Cache {
         let mut all_keys = Vec::new();
         for shard_lock in &self.shards {
             let lock = shard_lock.lock();
-            let cache = lock.as_ref().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+            let cache = lock.as_ref().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             all_keys.extend(cache.keys());
         }
         Ok(all_keys)
@@ -320,46 +331,52 @@ impl Cache {
     pub fn increment(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
-        let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+        let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        let mut current_val = 0i64;
-        
-        if let Some(bytes) = cache.get(&key) {
-            if !bytes.is_empty() {
-                let tag = bytes[0];
-                let payload = &bytes[1..];
-                match tag {
-                    4 => {
-                        if payload.len() == 8 {
-                            current_val = i64::from_ne_bytes(payload.try_into().unwrap());
-                        } else {
-                            return Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted"));
+        let mut run = || -> Result<JsUnknown> {
+            let mut current_val = 0i64;
+            
+            if let Some(bytes) = cache.get(&key) {
+                if !bytes.is_empty() {
+                    let tag = bytes[0];
+                    let payload = &bytes[1..];
+                    match tag {
+                        4 => {
+                            if payload.len() == 8 {
+                                current_val = i64::from_ne_bytes(payload.try_into().unwrap());
+                            } else {
+                                return Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted"));
+                            }
                         }
-                    }
-                    3 => {
-                        let s = std::str::from_utf8(payload)
-                            .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
-                        if let Ok(val) = s.parse::<i64>() {
-                            current_val = val;
-                        } else {
-                            return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a valid 64-bit integer"));
+                        3 => {
+                            let s = std::str::from_utf8(payload)
+                                .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
+                            if let Ok(val) = s.parse::<i64>() {
+                                current_val = val;
+                            } else {
+                                return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a valid 64-bit integer"));
+                            }
                         }
+                        _ => return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a numeric counter")),
                     }
-                    _ => return Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a numeric counter")),
                 }
             }
-        }
-        
-        let new_val = current_val.wrapping_add(delta);
-        let mut new_bytes = Vec::with_capacity(9);
-        new_bytes.push(4); // Tag 4: i64
-        new_bytes.extend_from_slice(&new_val.to_ne_bytes());
-        
-        let ttl = ttl_ms.map(|ms| ms as u64);
-        cache.set(&key, new_bytes, ttl);
-        
-        let js_num = env.create_double(new_val as f64)?;
-        Ok(js_num.into_unknown())
+            
+            let new_val = current_val.wrapping_add(delta);
+            let mut new_bytes = Vec::with_capacity(9);
+            new_bytes.push(4); // Tag 4: i64
+            new_bytes.extend_from_slice(&new_val.to_ne_bytes());
+            
+            let ttl = ttl_ms.map(|ms| ms as u64);
+            cache.set(&key, new_bytes, ttl);
+            
+            let js_num = env.create_double(new_val as f64)?;
+            Ok(js_num.into_unknown())
+        };
+
+        let res = run();
+        *lock = Some(cache);
+        res
     }
 
     #[napi(catch_unwind)]
@@ -373,14 +390,15 @@ impl Cache {
         for key in keys {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
-            let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+            let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             
-            if let Some(bytes) = cache.get(&key) {
-                let val = self.deserialize_value(env, bytes)?;
-                result.push(val);
+            let val_res = if let Some(bytes) = cache.get(&key) {
+                self.deserialize_value(env, bytes)
             } else {
-                result.push(env.get_undefined()?.into_unknown());
-            }
+                Ok(env.get_undefined()?.into_unknown())
+            };
+            *lock = Some(cache);
+            result.push(val_res?);
         }
         Ok(result)
     }
@@ -401,8 +419,9 @@ impl Cache {
             
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
-            let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
+            let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             cache.set(&key, bytes, ttl);
+            *lock = Some(cache);
         }
         Ok(())
     }
@@ -413,8 +432,10 @@ impl Cache {
         for key in keys {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
-            let cache = lock.as_mut().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed"))?;
-            if cache.delete(&key) {
+            let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
+            let deleted = cache.delete(&key);
+            *lock = Some(cache);
+            if deleted {
                 count += 1;
             }
         }
@@ -427,7 +448,10 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn test_panic(&self) {
+    pub fn test_panic(&self, key: String) {
+        let shard_lock = self.get_shard(&key).unwrap();
+        let mut lock = shard_lock.lock();
+        let mut _cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned")).unwrap();
         panic!("Intended test panic in Rust code!");
     }
 }

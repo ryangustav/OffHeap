@@ -457,13 +457,33 @@ test('Cache Policies - W-TinyLFU Eviction Memory Leak Protection', () => {
   manager.dispose();
 });
 
-test('Panic Safety - Rust Panics do not crash Node.js process', () => {
+test('Panic Safety - Rust Panics do not crash Node.js process and poison cleanly', () => {
   const manager = new CacheManager();
-  const cache = manager.createCache('panic-test', { capacity: 10 });
+  const cache = manager.createCache('panic-test', { capacity: 10, shards: 8 });
 
+  // 1. Force a panic during a locked operation on "key-0"
   assert.throws(() => {
-    cache._native.testPanic();
+    cache._native.testPanic("key-0");
   }, /Intended test panic in Rust code!/);
+
+  // 2. Future operations on keys mapping to that same poisoned shard must fail with a clear exception
+  assert.throws(() => {
+    cache.set("key-0", "val");
+  }, /Cache has been disposed/);
+
+  // 3. Keys mapping to different shards must continue to work perfectly without issue (isolation)
+  let worksOnOtherShard = false;
+  for (let i = 1; i < 100; i++) {
+    try {
+      cache.set(`key-${i}`, "val");
+      assert.strictEqual(cache.get(`key-${i}`), "val");
+      worksOnOtherShard = true;
+      break;
+    } catch (e) {
+      // Hashed to the same poisoned shard, skip and try next
+    }
+  }
+  assert.ok(worksOnOtherShard, "Unpoisoned shards should remain fully functional");
 
   cache.dispose();
   manager.dispose();
