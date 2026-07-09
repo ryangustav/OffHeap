@@ -239,10 +239,12 @@ impl TinyLfuCache {
         meta.len += 1;
     }
 
-    fn remove_completely(&mut self, idx: usize) -> String {
+    fn remove_completely(&mut self, idx: usize, already_detached: bool) -> String {
         let bytes = self.node_bytes(idx);
         self.bytes_used -= bytes;
-        self.detach(idx);
+        if !already_detached {
+            self.detach(idx);
+        }
         self.free_nodes.push(idx);
         let key = std::mem::take(&mut self.nodes[idx].key);
         self.nodes[idx].entry = CacheEntry::new(Vec::new(), None);
@@ -256,7 +258,7 @@ impl CacheImpl for TinyLfuCache {
 
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx);
+                let evicted_key = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 self.misses += 1;
                 None
@@ -295,7 +297,7 @@ impl CacheImpl for TinyLfuCache {
     fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx);
+                let evicted_key = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 self.misses += 1;
                 None
@@ -312,7 +314,7 @@ impl CacheImpl for TinyLfuCache {
     fn has(&mut self, key: &str) -> bool {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx);
+                let evicted_key = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 false
             } else {
@@ -403,11 +405,11 @@ impl CacheImpl for TinyLfuCache {
                                 let victim_freq = self.sketch.estimate(victim_key);
 
                                 if candidate_freq > victim_freq {
-                                    let evicted_key = self.remove_completely(victim_idx);
+                                    let evicted_key = self.remove_completely(victim_idx, false);
                                     self.map.remove(&evicted_key);
                                     self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                                 } else {
-                                    let evicted_key = self.remove_completely(candidate_idx);
+                                    let evicted_key = self.remove_completely(candidate_idx, true);
                                     self.map.remove(&evicted_key);
                                 }
                             } else {
@@ -415,7 +417,7 @@ impl CacheImpl for TinyLfuCache {
                             }
                         }
                     } else {
-                        let evicted_key = self.remove_completely(candidate_idx);
+                        let evicted_key = self.remove_completely(candidate_idx, true);
                         self.map.remove(&evicted_key);
                     }
                 }
@@ -425,10 +427,10 @@ impl CacheImpl for TinyLfuCache {
         if let Some(max) = self.max_bytes {
             while self.bytes_used > max && (self.probation.len > 0 || self.window.len > 0) {
                 if let Some(prob_tail) = self.probation.tail {
-                    let evicted_key = self.remove_completely(prob_tail);
+                    let evicted_key = self.remove_completely(prob_tail, false);
                     self.map.remove(&evicted_key);
                 } else if let Some(win_tail) = self.window.tail {
-                    let evicted_key = self.remove_completely(win_tail);
+                    let evicted_key = self.remove_completely(win_tail, false);
                     self.map.remove(&evicted_key);
                 } else {
                     break;
@@ -442,7 +444,7 @@ impl CacheImpl for TinyLfuCache {
     fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx);
+                let evicted_key = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 false
             } else {
@@ -462,7 +464,7 @@ impl CacheImpl for TinyLfuCache {
 
     fn delete(&mut self, key: &str) -> bool {
         if let Some(&idx) = self.map.get(key) {
-            self.remove_completely(idx);
+            self.remove_completely(idx, false);
             self.map.remove(key);
             true
         } else {
