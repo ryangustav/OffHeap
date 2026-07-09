@@ -16,7 +16,7 @@ impl CacheManager {
         }
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn create_cache(&self, name: String, config: CacheConfig) -> Result<Cache> {
         let mut lock = self.caches.write();
         if lock.contains_key(&name) {
@@ -30,19 +30,19 @@ impl CacheManager {
         Ok(cache)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn get_cache(&self, name: String) -> Option<Cache> {
         let lock = self.caches.read();
         lock.get(&name).cloned()
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn delete_cache(&self, name: String) -> bool {
         let mut lock = self.caches.write();
         lock.remove(&name).is_some()
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn clear(&self) {
         let mut lock = self.caches.write();
         lock.clear();

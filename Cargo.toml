@@ -26,7 +26,6 @@ napi-build = "2.1.3"
 lto = true
 opt-level = 3
 codegen-units = 1
-panic = "abort"
 strip = true
 
 [[bench]]
