@@ -7,7 +7,6 @@ yarn-error.log*
 
 # Rust
 target/
-Cargo.lock
 
 # NAPI-RS Generated files (except loader and d.ts if required)
 *.node
