@@ -423,3 +423,36 @@ test('Performance Regression - Fast Path Throughput', () => {
   cache.dispose();
   manager.dispose();
 });
+
+test('Cache Policies - W-TinyLFU Eviction Memory Leak Protection', () => {
+  const manager = new CacheManager();
+  const capacity = 100;
+  
+  const cache = manager.createCache('tinylfu-leak-test', {
+    policy: 'tinylfu',
+    capacity,
+    shards: 1, // Single shard for deterministic sizing behavior
+    l1Capacity: 0
+  });
+
+  // Write way more items than the cache capacity to trigger evictions
+  for (let i = 0; i < 1000; i++) {
+    cache.set(`key-${i}`, `val-${i}`);
+  }
+
+  // 1. Verify stats size matches capacity boundaries
+  const stats = cache.stats();
+  assert.ok(stats.size <= capacity, `Cache size exceeded capacity! Size: ${stats.size}`);
+
+  // 2. Black-box leak check: query every key to confirm only <= capacity keys are readable/present
+  let readableKeysCount = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (cache.get(`key-${i}`) !== undefined) {
+      readableKeysCount++;
+    }
+  }
+  assert.ok(readableKeysCount <= capacity, `Leaked keys are readable! Count: ${readableKeysCount}`);
+
+  cache.dispose();
+  manager.dispose();
+});
