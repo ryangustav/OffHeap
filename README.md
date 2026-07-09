@@ -61,11 +61,11 @@ To justify making **W-TinyLFU** the default eviction engine, we simulated 100,00
 
 | Zipfian Skew ($s$) | LRU (Baseline) | ARC (Self-Tuning) | W-TinyLFU (Default) | W-TinyLFU VS LRU (Delta) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Low Skew ($s = 0.5$)** | 30.89% | 34.89% | **90.11%** | **+59.22% (Winner)** |
-| **Medium Skew ($s = 0.7$)**| 46.00% | 50.90% | **90.18%** | **+44.18% (Winner)** |
-| **High Skew ($s = 0.9$)** | 65.83% | 69.48% | **90.81%** | **+24.98% (Winner)** |
+| **Low Skew ($s = 0.5$)** | 30.82% | 34.69% | **37.64%** | **+6.82% (Winner)** |
+| **Medium Skew ($s = 0.7$)**| 45.85% | 50.70% | **53.34%** | **+7.49% (Winner)** |
+| **High Skew ($s = 0.9$)** | 65.21% | 69.11% | **70.67%** | **+5.46% (Winner)** |
 
-*   **Why W-TinyLFU Wins Dominantly**: LRU and ARC are vulnerable to quick eviction when cold keys enter the cache in bursts. Under low-skew or near-uniform access patterns, LRU suffers from catastrophic cache **thrashing** (admitting transient items that are never read again). W-TinyLFU's Count-Min frequency sketch acts as a filter, rejecting low-frequency entries and maintaining the top 20% hottest items in cache. This achieves a near-perfect **90% hit ratio** regardless of access skew.
+*   **Why W-TinyLFU Wins Consistently**: LRU and ARC are vulnerable to quick eviction when cold keys enter the cache in bursts. W-TinyLFU's Count-Min frequency sketch acts as a filter, rejecting low-frequency entries and admitting new keys only if their access frequency exceeds the victim candidate, consistently outperforming LRU and ARC across all skew intensities.
 
 ---
 
