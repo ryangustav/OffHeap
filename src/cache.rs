@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::collections::hash_map::RandomState;
+use std::hash::{Hash, Hasher, BuildHasher};
 use napi::{Env, JsUnknown, JsBuffer, JsString, JsObject, Result, ValueType};
 use super::algorithms::{CacheImpl, lru::LruCache, arc::ArcCache, tinylfu::TinyLfuCache};
-use rand::Rng;
 
 #[napi(object)]
 pub struct CacheConfig {
@@ -25,7 +26,8 @@ pub struct CacheStatsJs {
 pub struct Cache {
     shards: Vec<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>>,
     compression: bool,
-    seed: usize,
+    hasher: Arc<RandomState>,
+    max_bytes: Option<usize>,
 }
 
 impl Clone for Cache {
@@ -33,7 +35,8 @@ impl Clone for Cache {
         Self {
             shards: self.shards.clone(),
             compression: self.compression,
-            seed: self.seed,
+            hasher: Arc::clone(&self.hasher),
+            max_bytes: self.max_bytes,
         }
     }
 }
@@ -46,7 +49,8 @@ impl Cache {
         let compression = config.compression.unwrap_or(false);
         
         let shard_capacity = (capacity / shards_count).max(1);
-        let shard_max_bytes = config.max_bytes.map(|mb| (mb as usize / shards_count).max(1));
+        let max_bytes = config.max_bytes.map(|mb| mb as usize);
+        let shard_max_bytes = max_bytes.map(|mb| (mb / shards_count).max(1));
 
         let mut shards = Vec::with_capacity(shards_count);
         for _ in 0..shards_count {
@@ -58,13 +62,15 @@ impl Cache {
             shards.push(Arc::new(parking_lot::Mutex::new(Some(inner))));
         }
 
-        let seed = rand::thread_rng().gen::<usize>();
+        let hasher = Arc::new(RandomState::new());
 
-        Self { shards, compression, seed }
+        Self { shards, compression, hasher, max_bytes }
     }
 
     fn get_shard(&self, key: &str) -> Result<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>> {
-        let hash = seahash::hash(key.as_bytes()) as usize ^ self.seed;
+        let mut hasher = self.hasher.build_hasher();
+        key.hash(&mut hasher);
+        let hash = hasher.finish() as usize;
         let idx = hash % self.shards.len();
         Ok(Arc::clone(&self.shards[idx]))
     }
@@ -186,8 +192,11 @@ impl Cache {
                 }
                 let uncompressed_size = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
                 
-                // Enforce safety limit of 32 MB to prevent decompression bombs and OOM allocation panics
-                let limit = 32 * 1024 * 1024;
+                // Enforce safety limit of min(32 MB, max_bytes * 0.1) to prevent decompression bombs and OOM allocation panics
+                let mut limit = 32 * 1024 * 1024;
+                if let Some(mb) = self.max_bytes {
+                    limit = limit.min((mb as f64 * 0.1) as usize).max(1024);
+                }
                 if uncompressed_size > limit {
                     return Err(napi::Error::new(
                         napi::Status::InvalidArg,

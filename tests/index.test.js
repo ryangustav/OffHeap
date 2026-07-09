@@ -510,3 +510,29 @@ test('Security - LZ4 Decompression size safety limit protection', () => {
   cache.dispose();
   manager.dispose();
 });
+
+test('Security - LZ4 Decompression size safety limit scales dynamically with maxBytes', () => {
+  const manager = new CacheManager();
+  // maxBytes is 10 KB, so limit scales down to 10% = 1 KB (1000 bytes)
+  const cache = manager.createCache('decomp-limit-scale-test', { 
+    capacity: 10,
+    maxBytes: 10000
+  });
+
+  // Construct a payload:
+  // - Byte 0: Tag 5 (LZ4)
+  // - Bytes 1-4: 2 KB uncompressed size prefix (2048 bytes = little-endian [0x00, 0x08, 0x00, 0x00])
+  // - Bytes 5..: Dummy payload bytes
+  const malformedPayload = [
+    5,                      // Tag 5
+    0x00, 0x08, 0x00, 0x00, // 2 KB (2048) size prefix
+    0x12, 0x34              // Dummy bytes
+  ];
+
+  assert.throws(() => {
+    cache._native.testDeserializeRaw(malformedPayload);
+  }, /exceeds safety limit of 1024 bytes/);
+
+  cache.dispose();
+  manager.dispose();
+});
