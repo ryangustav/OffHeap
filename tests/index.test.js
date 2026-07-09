@@ -379,3 +379,47 @@ test('Cache - Read/Write Config Change Isolation', () => {
   cache.dispose();
   manager.dispose();
 });
+
+test('Cache - Reverse Tag Change Isolation', () => {
+  const manager = new CacheManager({
+    compression: { enabled: false },
+    eviction: { policy: 'lru', capacity: 10 }
+  });
+
+  const cache = manager.createCache('reverse-isolation-cache');
+  const payload = { test: 'value_uncompressed' };
+
+  // Stored with Tag 3 (raw JSON)
+  cache.set('item', payload);
+
+  // Dynamically enable compression on the config object
+  cache._config.compression.enabled = true;
+  cache._config.compression.minSizeBytes = 5;
+
+  // Reading must still deserialize correctly because Tag 3 is self-describing
+  assert.deepStrictEqual(cache.get('item'), payload);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Performance Regression - Fast Path Throughput', () => {
+  const manager = new CacheManager({
+    eviction: { policy: 'lru', capacity: 10000 }
+  });
+  const cache = manager.createCache('perf-test');
+
+  const start = performance.now();
+  const iterations = 30000;
+  for (let i = 0; i < iterations; i++) {
+    cache.set(`key-${i}`, { id: i });
+  }
+  const duration = performance.now() - start;
+  const opsSec = (iterations / duration) * 1000;
+
+  // The default fast-path should comfortably do at least 150k ops/sec even in loaded test environments
+  assert.ok(opsSec > 150000, `Default fast-path throughput degraded! Measured: ${Math.round(opsSec)} ops/sec`);
+
+  cache.dispose();
+  manager.dispose();
+});

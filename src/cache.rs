@@ -70,14 +70,20 @@ impl Cache {
     /// Every entry written off-heap is prefixed with a 1-byte protocol header
     /// (Tag) that determines how the trailing slice payload is deserialized:
     ///
-    ///   Tag 1: Raw Binary Buffer (Stored contiguously in native memory)
-    ///   Tag 2: Raw UTF-8 String (Decoded directly into v8::String)
-    ///   Tag 3: Raw JSON String (Raw text JSON representation of JS objects)
-    ///   Tag 4: Atomic Counter (64-bit signed integer representation)
-    ///   Tag 5: LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///   🏷️ CATEGORY RANGES:
+    ///     [1 - 20]   : Core payload datatypes & baseline formats
+    ///     [21 - 90]  : Reserved for future structured formats (e.g., MsgPack, Protobuf)
+    ///     [91 - 99]  : Reserved for internal testing, diagnostics, & custom overrides
     ///
-    /// When expanding types (e.g., Tag 6 for MsgPack, Tag 7 for Zstd):
-    ///   1. Register the tag code here.
+    ///   📌 TAGS IN USE:
+    ///     Tag 1: Raw Binary Buffer (Stored contiguously in native memory)
+    ///     Tag 2: Raw UTF-8 String (Decoded directly into v8::String)
+    ///     Tag 3: Raw JSON String (Raw text JSON representation of JS objects)
+    ///     Tag 4: Atomic Counter (64-bit signed integer representation)
+    ///     Tag 5: LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///
+    /// When expanding types:
+    ///   1. Register the tag code here following the range guidelines above.
     ///   2. Handle serialization tag routing in `serialize_value`.
     ///   3. Implement safety catches for new tags in `deserialize_value`.
     /// ========================================================================
