@@ -222,10 +222,18 @@ impl Cache {
     }
 }
 
+fn validate_key(key: &str) -> Result<()> {
+    if key.len() > 8192 {
+        return Err(napi::Error::new(napi::Status::InvalidArg, "Key length exceeds safety limit of 8192 bytes"));
+    }
+    Ok(())
+}
+
 #[napi]
 impl Cache {
     #[napi(catch_unwind)]
     pub fn get(&self, env: Env, key: String) -> Result<JsUnknown> {
+        validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -241,6 +249,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn peek(&self, env: Env, key: String) -> Result<JsUnknown> {
+        validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -256,6 +265,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn has(&self, key: String) -> Result<bool> {
+        validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -266,6 +276,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
+        validate_key(&key)?;
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         
@@ -279,6 +290,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn touch(&self, key: String, ttl_ms: Option<f64>) -> Result<bool> {
+        validate_key(&key)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
@@ -290,6 +302,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn delete(&self, key: String) -> Result<bool> {
+        validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -359,6 +372,7 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn increment(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
+        validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -418,6 +432,7 @@ impl Cache {
     pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<Vec<JsUnknown>> {
         let mut result = Vec::with_capacity(keys.len());
         for key in keys {
+            validate_key(&key)?;
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
@@ -443,6 +458,7 @@ impl Cache {
             let key_unknown: JsUnknown = keys_array.get_element(i)?;
             let key_str = key_unknown.coerce_to_string()?;
             let key = key_str.into_utf8()?.into_owned()?;
+            validate_key(&key)?;
             
             let val: JsUnknown = entries.get_named_property(&key)?;
             let bytes = self.serialize_value(env, val, None)?;
@@ -460,6 +476,7 @@ impl Cache {
     pub fn mdelete(&self, keys: Vec<String>) -> Result<u32> {
         let mut count = 0;
         for key in keys {
+            validate_key(&key)?;
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;

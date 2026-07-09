@@ -97,8 +97,9 @@ function validateKey(key) {
   if (typeof key !== 'string') {
     throw new TypeError('Key must be a string');
   }
-  if (key.length > 8192) {
-    throw new RangeError('Key length exceeds safety limit of 8192 characters');
+  const byteLength = Buffer.byteLength(key, 'utf8');
+  if (byteLength > 8192) {
+    throw new RangeError('Key length exceeds safety limit of 8192 bytes');
   }
 }
 
