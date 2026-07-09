@@ -405,7 +405,7 @@ test('Cache - Reverse Tag Change Isolation', () => {
 
 test('Performance Regression - Fast Path Throughput', () => {
   const manager = new CacheManager({
-    eviction: { policy: 'lru', capacity: 10000 }
+    eviction: { capacity: 10000 }
   });
   const cache = manager.createCache('perf-test');
 

@@ -76,11 +76,12 @@ impl Cache {
     ///     [91 - 99]  : Reserved for internal testing, diagnostics, & custom overrides
     ///
     ///   📌 TAGS IN USE:
-    ///     Tag 1: Raw Binary Buffer (Stored contiguously in native memory)
-    ///     Tag 2: Raw UTF-8 String (Decoded directly into v8::String)
-    ///     Tag 3: Raw JSON String (Raw text JSON representation of JS objects)
-    ///     Tag 4: Atomic Counter (64-bit signed integer representation)
-    ///     Tag 5: LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///     Tag 1:  Raw Binary Buffer (Stored contiguously in native memory)
+    ///     Tag 2:  Raw UTF-8 String (Decoded directly into v8::String)
+    ///     Tag 3:  Raw JSON String (Raw text JSON representation of JS objects)
+    ///     Tag 4:  Atomic Counter (64-bit signed integer representation)
+    ///     Tag 5:  LZ4 Compressed JSON String (Decompressed on demand, self-describing)
+    ///     Tag 99: Test Sentinel (Reserved for diagnostic tests, do not use in production)
     ///
     /// When expanding types:
     ///   1. Register the tag code here following the range guidelines above.
