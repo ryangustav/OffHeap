@@ -93,6 +93,15 @@ function normalizeConfig(config) {
   return normalized;
 }
 
+function validateKey(key) {
+  if (typeof key !== 'string') {
+    throw new TypeError('Key must be a string');
+  }
+  if (key.length > 8192) {
+    throw new RangeError('Key length exceeds safety limit of 8192 characters');
+  }
+}
+
 class Cache {
   constructor(nativeCache, config = {}) {
     this._native = nativeCache;
@@ -120,6 +129,7 @@ class Cache {
   }
 
   get(key) {
+    validateKey(key);
     // 1. Check JS-local L1 cache (FIFO read - zero writes on hit)
     if (this._l1Capacity > 0) {
       const l1Val = this._l1.get(key);
@@ -137,6 +147,7 @@ class Cache {
   }
 
   peek(key) {
+    validateKey(key);
     if (this._l1Capacity > 0) {
       const l1Val = this._l1.get(key);
       if (l1Val !== undefined) {
@@ -147,6 +158,7 @@ class Cache {
   }
 
   has(key) {
+    validateKey(key);
     if (this._l1Capacity > 0 && this._l1.has(key)) {
       return true;
     }
@@ -154,6 +166,7 @@ class Cache {
   }
 
   set(key, value, ttlMsOrOptions) {
+    validateKey(key);
     let ttlMs = this._config.ttl ? this._config.ttl.defaultMs : undefined;
     let compression = this._config.compression ? this._config.compression.enabled : false;
     let minSizeBytes = this._config.compression ? (this._config.compression.minSizeBytes || 1024) : 1024;
@@ -188,11 +201,13 @@ class Cache {
   }
 
   touch(key, ttlMs) {
+    validateKey(key);
     this._l1.delete(key); // Invalidate L1 on TTL update
     return this._native.touch(key, ttlMs);
   }
 
   delete(key) {
+    validateKey(key);
     this._l1.delete(key);
     return this._native.delete(key);
   }
@@ -218,20 +233,26 @@ class Cache {
   }
 
   increment(key, delta = 1, ttlMs) {
+    validateKey(key);
     this._l1.delete(key); // Invalidate L1 on mutation
     return this._native.increment(key, delta, ttlMs);
   }
 
   decrement(key, delta = 1, ttlMs) {
+    validateKey(key);
     this._l1.delete(key); // Invalidate L1 on mutation
     return this._native.decrement(key, delta, ttlMs);
   }
 
   mget(keys) {
+    if (!Array.isArray(keys)) {
+      throw new Error('mget requires an array of keys');
+    }
     const missing = [];
     const result = {};
 
     for (const key of keys) {
+      validateKey(key);
       if (this._l1Capacity > 0) {
         const val = this._l1.get(key);
         if (val !== undefined) {
@@ -263,18 +284,19 @@ class Cache {
     }
     const wrapped = {};
     for (const k in entries) {
+      validateKey(k);
       const val = entries[k];
       this._l1.delete(k); // Invalidate L1
       wrapped[k] = wrapValue(val);
     }
     this._native.mset(wrapped, ttlMs);
   }
-
   mdelete(keys) {
     if (!Array.isArray(keys)) {
       throw new Error('mdelete requires an array of keys');
     }
     for (const k of keys) {
+      validateKey(k);
       this._l1.delete(k);
     }
     return this._native.mdelete(keys);
