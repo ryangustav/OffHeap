@@ -89,7 +89,7 @@ test('Cache Policies - ARC adaptation & eviction', () => {
 test('Cache Policies - W-TinyLFU eviction competition', () => {
   const manager = new CacheManager();
   // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 10
-  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
+  const cache = manager.createCache('tinylfu-evict', { policy: 'w-tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
 
   // Fill cache
   for (let i = 0; i < 12; i++) {

@@ -84,6 +84,15 @@ To ensure high performance and transparent hit-rate optimization under varying w
    - *Paper: "TinyLFU: A Highly Efficient Cache Admission Policy" (TDE '17)*
    - Utilizes a **4-bit Count-Min Sketch** frequency sketch (with a decay/reset aging policy). Combines a small Window LRU and a Segmented LRU Main Cache.
 
+### Security & Memory Considerations
+
+*   **Physical Namespace Isolation vs. Collision Risk**:
+    *   Calling `CacheManager.createCache(name, config)` creates a physically isolated native `Cache` instance with its own shards and maps. Keys cannot collide across different namespace instances.
+    *   If developers choose to partition a single `Cache` instance manually (e.g., prefixing keys as `tenant_id + "::" + user_key`), they must sanitize/escape the `::` separator to prevent cross-tenant key collision vulnerabilities.
+*   **Memory Releasing & Zeroization**:
+    *   Evicted or deleted cache items are released back to the native `mimalloc` allocator.
+    *   OffHeap does **not** zero out (wipe) the memory bytes before returning the buffer to the allocator. If caching highly sensitive credentials (like passwords or tokens), implement application-layer encryption or zeroization before caching if secure memory wiping is required.
+
 ---
 
 ## 💻 Usage
@@ -93,7 +102,7 @@ const { CacheManager } = require('./index.js');
 
 // 1. Global Config: Set defaults for all namespace caches
 const manager = new CacheManager({
-  eviction: { policy: 'tinylfu', capacity: 50000 },
+  eviction: { policy: 'w-tinylfu', capacity: 50000 },
   compression: { enabled: true, minSizeBytes: 1024 }, // LZ4 on JSON payloads >= 1KB
   l1: { enabled: true },
   ttl: { defaultMs: 1000 * 60 * 15 } // 15 mins default

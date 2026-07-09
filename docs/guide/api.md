@@ -21,7 +21,7 @@ Instantiates a new central cache manager.
 Creates and returns an isolated cache instance.
 ```javascript
 const cache = manager.createCache('products', {
-  policy: 'tinylfu',
+  policy: 'w-tinylfu',
   capacity: 10000,
   shards: 16,
   maxBytes: 100 * 1024 * 1024 // 100 MB byte-capacity limit
@@ -30,7 +30,7 @@ const cache = manager.createCache('products', {
 * **Parameters**:
   * `name` (`string`): Unique name/namespace for the cache.
   * `config` (`CacheConfig`):
-    * `policy` (`"lru" | "arc" | "tinylfu"`): The eviction policy.
+    * `policy` (`"lru" | "arc" | "w-tinylfu" | "tinylfu"`): The eviction policy. `"w-tinylfu"` is the default and preferred policy name; `"tinylfu"` is accepted as an alias.
     * `capacity` (`number`): The maximum number of entries allowed in the cache.
     * `shards` (`number`, *optional*): Number of internal locks shards. High concurrency workloads benefit from larger shard numbers (e.g. 16 or 32). Default: `8`.
     * `maxBytes` (`number`, *optional*): The maximum memory size of keys and values combined in bytes. When this threshold is crossed, entries are evicted according to the active policy.

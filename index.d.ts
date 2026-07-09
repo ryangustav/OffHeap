@@ -1,5 +1,5 @@
 export interface EvictionConfig {
-  policy: 'lru' | 'arc' | 'tinylfu';
+  policy: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
   capacity: number;
   maxBytes?: number;
 }
@@ -28,7 +28,7 @@ export interface CacheConfig {
   ttl?: TtlConfig;
   
   // Legacy options (Backward Compatibility)
-  policy?: 'lru' | 'arc' | 'tinylfu';
+  policy?: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
   capacity?: number;
   maxBytes?: number;
   l1Capacity?: number;

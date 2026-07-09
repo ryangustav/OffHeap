@@ -29,7 +29,7 @@ function unwrapValue(val) {
 const DEFAULT_CONFIG = {
   shards: 8,
   eviction: {
-    policy: 'tinylfu',
+    policy: 'w-tinylfu',
     capacity: 10000,
     maxBytes: undefined,
   },
