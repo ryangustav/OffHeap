@@ -2,6 +2,14 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.5] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (npm platform directories)**: Committed the `npm/` platform directories (generated via `napi create-npm-dir`) to the repository. These directories contain the `package.json` stubs with `os`, `cpu`, and `main` fields that NAPI-RS requires to exist on disk before `napi artifacts` can copy `.node` binaries into them. Previously they were never committed to git, causing `ENOENT` write failures in CI.
+* **Removed redundant `Prepublish` CI step**: The `napi prepublish` command does not create directories — it only publishes existing ones. Removed the step from the publish job since it served no purpose without pre-existing directories.
+
+---
+
 ## [0.3.4] - 2026-07-09
 
 ### Fixed

@@ -1,0 +1,19 @@
+{
+  "name": "offheap-win32-x64-msvc",
+  "version": "0.3.5",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "offheap.win32-x64-msvc.node",
+  "files": [
+    "offheap.win32-x64-msvc.node"
+  ],
+  "description": "High-performance off-heap caching framework for Node.js written in Rust",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

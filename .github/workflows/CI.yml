@@ -155,9 +155,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepublish
-        run: npm run prepublishOnly
-
       - name: Copy artifacts
         run: |
           npm run artifacts
