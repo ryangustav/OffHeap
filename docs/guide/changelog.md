@@ -2,6 +2,15 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.6] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (npm local path & script execution)**:
+  - Prefixed local publication paths with `./` (e.g. `./npm/*`) in `CI.yml` so that `npm publish` correctly recognizes them as local directories instead of attempting to fetch git ssh paths.
+  - Added `--ignore-scripts` to the main package publication command. This prevents the `prepublishOnly` script hook from triggering `napi prepublish` inside CI, avoiding secondary target publication conflicts and registry E403 forbidden errors.
+
+---
+
 ## [0.3.5] - 2026-07-09
 
 ### Fixed

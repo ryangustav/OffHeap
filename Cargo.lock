@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "offheap"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "criterion",
  "lz4_flex",
