@@ -1,6 +1,6 @@
 [package]
 name = "offheap"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 authors = ["Ryan Gustavo"]
 license = "MIT OR Apache-2.0"
