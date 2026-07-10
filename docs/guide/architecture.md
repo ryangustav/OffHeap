@@ -56,3 +56,15 @@ While LRU is the industry default, it is highly susceptible to **sparse access b
 2. **Segmented LRU (SLRU) Main Cache**: The remaining 99% of the capacity is split into a **Probationary Segment** (20%) and a **Protected Segment** (80%). When an item in Probation is hit, it is promoted to the Protected segment.
 3. **TinyLFU Admission Filter**: When items overflow from the Window LRU, they compete to enter the Probationary segment. If the Probationary segment is full, the incoming item (candidate) is compared against the least recently used item in Probation (victim).
 4. **4-bit Count-Min Sketch**: OffHeap uses a memory-efficient Count-Min Sketch (with an aging decay mechanism) to track key frequencies. An item is only admitted to the main cache if its access frequency is strictly higher than the victim's. If not, the candidate is evicted immediately.
+
+---
+
+## Multi-Threading & Genuinely Shared State
+
+Unlike pure JavaScript where memory is strictly isolated between worker threads (unless utilizing complex `SharedArrayBuffer` structures), OffHeap supports a genuinely shared L2 cache state across multiple Node.js `worker_threads`:
+
+* **OS Process-Level Registry**: In Rust, the cache manager stores references to all active `Cache` instances in a process-wide global static map.
+* **Thread-Safe Memory Sharing**: Because the Rust library is loaded once per process, multiple worker threads calling `.getCache(name)` receive native cache wrappers pointing to the same underlying thread-safe atomic pointer (`Arc<Mutex<...>>`) to the cache shards.
+* **Zero Serialization Overhead**: Threads read and write directly to/from the same native memory space, completely bypassing the V8 Structured Clone algorithm and `postMessage` overhead.
+* **Consistency Options**: While L2 cache is strictly consistent process-wide, the optional JS-level L1 cache is thread-local. For absolute consistency across workers (at the expense of L1 cache acceleration), L1 can be disabled.
+

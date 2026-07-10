@@ -8,6 +8,9 @@ All methods exported by the native addon execute **synchronously** to avoid micr
 
 The central manager responsible for provisioning and isolating individual caches.
 
+> [!TIP]
+> **Cross-Thread Sharing**: All cache instances are shared process-wide across all Node.js `worker_threads`. You can instantiate a new `CacheManager` inside a worker thread and retrieve a cache created by the main thread using `manager.getCache(name)`.
+
 ```javascript
 const { CacheManager } = require('offheap');
 const manager = new CacheManager();
@@ -34,6 +37,9 @@ const cache = manager.createCache('products', {
     * `capacity` (`number`): The maximum number of entries allowed in the cache.
     * `shards` (`number`, *optional*): Number of internal locks shards. High concurrency workloads benefit from larger shard numbers (e.g. 16 or 32). Default: `8`.
     * `maxBytes` (`number`, *optional*): The maximum memory size of keys and values combined in bytes. When this threshold is crossed, entries are evicted according to the active policy.
+    * `l1` (`object`, *optional*): Configures the fast JS-level L1 cache layer:
+      * `enabled` (`boolean`): Enable or disable the V8-heap L1 layer. Default: `true`.
+      * `capacity` (`number`, *optional*): Max L1 capacity. Default: 10% of L2 capacity (capped at `10000`).
 * **Returns**: `Cache` instance.
 * **Throws**: Error if a cache with the specified `name` already exists.
 
