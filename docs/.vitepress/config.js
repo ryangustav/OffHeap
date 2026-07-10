@@ -22,6 +22,13 @@ export default {
           { text: 'API Reference', link: '/guide/api' },
           { text: 'Benchmarks & Telemetry', link: '/guide/benchmarks' }
         ]
+      },
+      {
+        text: 'Project Status',
+        items: [
+          { text: 'Version Policy (SemVer)', link: '/guide/semver' },
+          { text: 'Changelog', link: '/guide/changelog' }
+        ]
       }
     ],
     socialLinks: [

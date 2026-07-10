@@ -1,0 +1,23 @@
+{
+  "name": "offheap-darwin-x64",
+  "version": "0.3.7",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "offheap.darwin-x64.node",
+  "files": [
+    "offheap.darwin-x64.node"
+  ],
+  "description": "High-performance off-heap caching framework for Node.js written in Rust",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryangustav/OffHeap.git"
+  }
+}

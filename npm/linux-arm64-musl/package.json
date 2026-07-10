@@ -1,0 +1,26 @@
+{
+  "name": "offheap-linux-arm64-musl",
+  "version": "0.3.7",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "offheap.linux-arm64-musl.node",
+  "files": [
+    "offheap.linux-arm64-musl.node"
+  ],
+  "description": "High-performance off-heap caching framework for Node.js written in Rust",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryangustav/OffHeap.git"
+  },
+  "libc": [
+    "musl"
+  ]
+}

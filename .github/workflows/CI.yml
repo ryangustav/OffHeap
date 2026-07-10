@@ -161,16 +161,13 @@ jobs:
           cp artifacts/bindings-*/binding.js . || true
           cp artifacts/bindings-*/binding.d.ts . || true
 
-      - name: Prepublish
-        run: npm run prepublishOnly
-
       - name: Publish to NPM
         run: |
-          for pkg in npm/*; do
+          for pkg in ./npm/*; do
             if [ -d "$pkg" ]; then
               npm publish "$pkg" --access public || true
             fi
           done
-          npm publish --access public --provenance
+          npm publish --access public --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
