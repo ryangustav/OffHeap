@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.11] - 2026-07-09
+
+### Fixed
+* **CI/CD Build (bootstrap resolution bypass)**: Configured all `npm ci` calls in `CI.yml` to omit optional dependencies during compile time using the `--omit=optional` flag. This breaks the bootstrapping catch-22, preventing the build/publish pipelines from failing when trying to resolve the new scoped packages (which don't exist on the registry yet).
+
+---
+
 ## [0.3.10] - 2026-07-09
 
 ### Fixed
