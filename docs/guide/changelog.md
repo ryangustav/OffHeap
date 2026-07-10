@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.3] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (napi config)**: Reconfigured `"napi"` block to use `triples.additional` in `package.json` so that the NAPI-RS CLI correctly maps all 7 target platforms, resolving the `No dist dir found` error during artifact packaging.
+
+---
+
 ## [0.3.2] - 2026-07-09
 
 ### Fixed

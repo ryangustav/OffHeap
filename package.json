@@ -1,20 +1,19 @@
 {
   "name": "offheap",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "High-performance off-heap caching framework for Node.js written in Rust",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
     "name": "offheap",
-    "targets": [
-      "x86_64-pc-windows-msvc",
-      "x86_64-unknown-linux-gnu",
-      "x86_64-unknown-linux-musl",
-      "x86_64-apple-darwin",
-      "aarch64-apple-darwin",
-      "aarch64-unknown-linux-musl",
-      "aarch64-unknown-linux-gnu"
-    ]
+    "triples": {
+      "additional": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
   },
   "scripts": {
     "artifacts": "napi artifacts",
@@ -39,12 +38,12 @@
   },
   "license": "MIT OR Apache-2.0",
   "optionalDependencies": {
-    "offheap-win32-x64-msvc": "0.3.2",
-    "offheap-darwin-x64": "0.3.2",
-    "offheap-linux-x64-gnu": "0.3.2",
-    "offheap-linux-x64-musl": "0.3.2",
-    "offheap-darwin-arm64": "0.3.2",
-    "offheap-linux-arm64-musl": "0.3.2",
-    "offheap-linux-arm64-gnu": "0.3.2"
+    "offheap-win32-x64-msvc": "0.3.3",
+    "offheap-darwin-x64": "0.3.3",
+    "offheap-linux-x64-gnu": "0.3.3",
+    "offheap-linux-x64-musl": "0.3.3",
+    "offheap-darwin-arm64": "0.3.3",
+    "offheap-linux-arm64-musl": "0.3.3",
+    "offheap-linux-arm64-gnu": "0.3.3"
   }
 }
