@@ -1,6 +1,6 @@
 {
   "name": "offheap",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "High-performance off-heap caching framework for Node.js written in Rust",
   "main": "index.js",
   "types": "index.d.ts",
@@ -42,12 +42,12 @@
     "url": "git+https://github.com/ryangustav/OffHeap.git"
   },
   "optionalDependencies": {
-    "offheap-win32-x64-msvc": "0.3.7",
-    "offheap-darwin-x64": "0.3.7",
-    "offheap-linux-x64-gnu": "0.3.7",
-    "offheap-linux-x64-musl": "0.3.7",
-    "offheap-darwin-arm64": "0.3.7",
-    "offheap-linux-arm64-musl": "0.3.7",
-    "offheap-linux-arm64-gnu": "0.3.7"
+    "offheap-win32-x64-msvc": "0.3.8",
+    "offheap-darwin-x64": "0.3.8",
+    "offheap-linux-x64-gnu": "0.3.8",
+    "offheap-linux-x64-musl": "0.3.8",
+    "offheap-darwin-arm64": "0.3.8",
+    "offheap-linux-arm64-musl": "0.3.8",
+    "offheap-linux-arm64-gnu": "0.3.8"
   }
 }
