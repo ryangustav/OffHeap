@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.12] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (include generated loaders)**: Configured an explicit `"files"` allowlist in the main `package.json`. This ensures that the generated `binding.js` and `binding.d.ts` native loader files are included in the published NPM package (previously they were excluded by NPM because they are listed in `.gitignore`), resolving runtime "Cannot find module './binding'" errors.
+
+---
+
 ## [0.3.11] - 2026-07-09
 
 ### Fixed
