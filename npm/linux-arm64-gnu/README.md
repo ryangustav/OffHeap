@@ -1,3 +1,3 @@
-# `@ryangustav/offheap-linux-arm64-gnu`
+# `@onlykgzin/offheap-linux-arm64-gnu`
 
-This is the **aarch64-unknown-linux-gnu** binary for `@ryangustav/offheap`
+This is the **aarch64-unknown-linux-gnu** binary for `@onlykgzin/offheap`

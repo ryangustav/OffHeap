@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.10] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (correct NPM scope @onlykgzin)**: Corrected the scope of all platform-specific sub-packages to be published under the `@onlykgzin/` scope (the actual owner's NPM username). This resolves the `Scope not found` publication errors.
+
+---
+
 ## [0.3.9] - 2026-07-09
 
 ### Fixed
