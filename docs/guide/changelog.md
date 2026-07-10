@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.7] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (npm provenance validation)**: Configured the `"repository"` URL block inside `package.json` and propagated it to all platform-specific sub-packages. This resolves the `Error verifying sigstore provenance bundle: Failed to validate repository information` error when publishing to NPM with provenance enabled.
+
+---
+
 ## [0.3.6] - 2026-07-09
 
 ### Fixed

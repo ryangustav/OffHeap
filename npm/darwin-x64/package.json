@@ -1,6 +1,6 @@
 {
   "name": "offheap-darwin-x64",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "os": [
     "darwin"
   ],
@@ -15,5 +15,9 @@
   "license": "MIT OR Apache-2.0",
   "engines": {
     "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryangustav/OffHeap.git"
   }
 }
