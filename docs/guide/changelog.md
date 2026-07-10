@@ -2,6 +2,11 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.2] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (napi artifacts)**: Added all 7 build targets to `optionalDependencies` in `package.json` to resolve the `Type Error: No dist dir found` error during `napi artifacts` execution in the release job.
+
 ---
 
 ## [0.3.1] - 2026-07-09
