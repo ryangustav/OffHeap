@@ -1,6 +1,6 @@
 {
-  "name": "offheap-darwin-x64",
-  "version": "0.3.8",
+  "name": "@ryangustav/offheap-darwin-x64",
+  "version": "0.3.9",
   "os": [
     "darwin"
   ],

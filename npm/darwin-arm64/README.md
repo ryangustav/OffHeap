@@ -1,3 +1,3 @@
-# `offheap-darwin-arm64`
+# `@ryangustav/offheap-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `offheap`
+This is the **aarch64-apple-darwin** binary for `@ryangustav/offheap`

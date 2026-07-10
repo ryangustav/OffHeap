@@ -1,6 +1,6 @@
 {
-  "name": "offheap-linux-arm64-gnu",
-  "version": "0.3.8",
+  "name": "@ryangustav/offheap-linux-arm64-gnu",
+  "version": "0.3.9",
   "os": [
     "linux"
   ],
