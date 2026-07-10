@@ -5,6 +5,9 @@ hero:
   name: OffHeap
   text: High-Performance Off-Heap Caching
   tagline: Bypassing the V8 Heap using native Rust and NAPI-RS. Zero Garbage Collection overhead at scale.
+  image:
+    src: /logo.png
+    alt: OffHeap Logo
   actions:
     - theme: brand
       text: Get Started
