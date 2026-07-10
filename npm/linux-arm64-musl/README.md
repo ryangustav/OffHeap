@@ -1,3 +1,3 @@
-# `offheap-linux-arm64-musl`
+# `@ryangustav/offheap-linux-arm64-musl`
 
-This is the **aarch64-unknown-linux-musl** binary for `offheap`
+This is the **aarch64-unknown-linux-musl** binary for `@ryangustav/offheap`

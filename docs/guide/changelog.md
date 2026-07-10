@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.9] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (NPM spam filter bypass)**: Configured all platform-specific sub-packages to be published under the `@ryangustav/` scope (e.g. `@ryangustav/offheap-win32-x64-msvc`), while keeping the main wrapper package unscoped (`offheap`). This successfully bypasses NPM's automated spam detection and typosquatting protection algorithms, which were blocking publication of the Windows package.
+
+---
+
 ## [0.3.8] - 2026-07-09
 
 ### Fixed

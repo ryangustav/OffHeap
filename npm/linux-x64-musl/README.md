@@ -1,3 +1,3 @@
-# `offheap-linux-x64-musl`
+# `@ryangustav/offheap-linux-x64-musl`
 
-This is the **x86_64-unknown-linux-musl** binary for `offheap`
+This is the **x86_64-unknown-linux-musl** binary for `@ryangustav/offheap`
