@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.8] - 2026-07-09
+
+### Fixed
+* **CI/CD Build (package-lock.json version sync)**: Re-generated and synchronized `package-lock.json` with the latest version `0.3.8` and all 7 optional native binary platform dependencies. Previously, `package-lock.json` was outdated at `0.1.0`, which caused `npm ci` to fail immediately in the build job for all platforms due to locks/manifest mismatch.
+
+---
+
 ## [0.3.7] - 2026-07-09
 
 ### Fixed
