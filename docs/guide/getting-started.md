@@ -8,13 +8,17 @@ const manager = new CacheManager();
 
 // 2. Instantiate isolated caches with specific eviction policies
 const productCache = manager.createCache('products', {
-  policy: 'tinylfu', // Options: 'lru', 'arc', 'tinylfu'
-  capacity: 100000   // Sized for up to 100,000 items
+  eviction: {
+    policy: 'w-tinylfu', // Options: 'lru', 'arc', 'w-tinylfu'
+    capacity: 100000     // Sized for up to 100,000 items
+  }
 });
 
 const sessionCache = manager.createCache('sessions', {
-  policy: 'lru',
-  capacity: 20000
+  eviction: {
+    policy: 'lru',
+    capacity: 20000
+  }
 });
 
 // 3. Store and retrieve values (Preserves Buffers, Strings, and JSON Objects)
