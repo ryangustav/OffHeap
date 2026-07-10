@@ -72,12 +72,8 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install musl-tools
-        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
       - name: Install Zig
-        if: contains(matrix.settings.target, 'aarch64-unknown-linux')
+        if: contains(matrix.settings.target, 'musl') || contains(matrix.settings.target, 'aarch64-unknown-linux')
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.11.0
@@ -103,7 +99,7 @@ jobs:
 
       - name: Build
         run: |
-          if [[ "${{ matrix.settings.target }}" == *"aarch64-unknown-linux"* ]]; then
+          if [[ "${{ matrix.settings.target }}" == *"aarch64-unknown-linux"* ]] || [[ "${{ matrix.settings.target }}" == *"musl"* ]]; then
             npm run build -- --target ${{ matrix.settings.target }} --zig
           else
             npm run build -- --target ${{ matrix.settings.target }}
