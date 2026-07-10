@@ -2,6 +2,13 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.3.4] - 2026-07-09
+
+### Fixed
+* **CI/CD Publish (prepublish order)**: Swapped the order of the `Prepublish` and `Copy artifacts` steps in the publish job in `CI.yml`. This ensures that the platform directories are scaffolded by `napi prepublish` before `napi artifacts` attempts to copy the `.node` binaries, preventing `ENOENT` directory-missing errors.
+
+---
+
 ## [0.3.3] - 2026-07-09
 
 ### Fixed

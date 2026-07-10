@@ -155,14 +155,14 @@ jobs:
         with:
           path: artifacts
 
+      - name: Prepublish
+        run: npm run prepublishOnly
+
       - name: Copy artifacts
         run: |
           npm run artifacts
           cp artifacts/bindings-*/binding.js . || true
           cp artifacts/bindings-*/binding.d.ts . || true
-
-      - name: Prepublish
-        run: npm run prepublishOnly
 
       - name: Publish to NPM
         run: |
