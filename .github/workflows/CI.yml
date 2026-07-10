@@ -123,8 +123,8 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: |
             *.node
-            index.js
-            index.d.ts
+            binding.js
+            binding.d.ts
           if-no-files-found: error
 
   publish:
@@ -157,15 +157,20 @@ jobs:
 
       - name: Copy artifacts
         run: |
-          # Move artifacts to root
-          cp artifacts/bindings-*/*.node . || true
-          cp artifacts/bindings-*/index.js . || true
-          cp artifacts/bindings-*/index.d.ts . || true
+          npm run artifacts
+          cp artifacts/bindings-*/binding.js . || true
+          cp artifacts/bindings-*/binding.d.ts . || true
 
       - name: Prepublish
         run: npm run prepublishOnly
 
       - name: Publish to NPM
-        run: npm publish --access public --provenance
+        run: |
+          for pkg in npm/*; do
+            if [ -d "$pkg" ]; then
+              npm publish "$pkg" --access public || true
+            fi
+          done
+          npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

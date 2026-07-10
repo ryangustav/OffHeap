@@ -625,3 +625,70 @@ test('Cache Policies - Eviction under multiple shards with randomized routing', 
   cache.dispose();
   manager.dispose();
 });
+
+test('Cache - Worker Threads Sharing', async () => {
+  const { Worker } = require('node:worker_threads');
+  
+  const manager = new CacheManager({
+    l1: { enabled: false } // Disable L1 for strict cross-thread consistency in this test
+  });
+  
+  // Create the shared cache in main thread
+  const cache = manager.createCache('shared-worker-cache', { policy: 'lru', capacity: 1000 });
+  cache.set('main-key', 'main-value');
+  
+  // Start concurrent worker threads to write and read
+  const workerCode = `
+    const { workerData, parentPort } = require('node:worker_threads');
+    const { CacheManager } = require('./index.js');
+    
+    const manager = new CacheManager({ l1: { enabled: false } });
+    const cache = manager.getCache('shared-worker-cache');
+    const threadId = workerData.threadId;
+    
+    for (let i = 0; i < 100; i++) {
+      cache.set(\`thread-\${threadId}-key-\${i}\`, \`value-\${i}\`);
+      const val = cache.get('main-key');
+      if (val !== 'main-value') {
+        throw new Error('Stale or missing main-key');
+      }
+    }
+    
+    parentPort.postMessage('done');
+  `;
+  
+  const spawnWorker = (threadId) => {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(workerCode, {
+        eval: true,
+        workerData: { threadId }
+      });
+      worker.on('message', resolve);
+      worker.on('error', reject);
+      worker.on('exit', (code) => {
+        if (code !== 0) reject(new Error(`Worker stopped with exit code ${code}`));
+      });
+    });
+  };
+  
+  // Spawn 4 concurrent worker threads
+  await Promise.all([
+    spawnWorker(1),
+    spawnWorker(2),
+    spawnWorker(3),
+    spawnWorker(4)
+  ]);
+  
+  // Verify main thread can read all values written by the workers
+  for (let t = 1; t <= 4; t++) {
+    for (let i = 0; i < 100; i++) {
+      assert.strictEqual(cache.get(`thread-${t}-key-${i}`), `value-${i}`);
+    }
+  }
+  
+  // Cleanup
+  manager.deleteCache('shared-worker-cache');
+  manager.dispose();
+});
+
+

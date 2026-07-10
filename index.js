@@ -1,13 +1,6 @@
 const { Cache: NativeCache, CacheManager: NativeCacheManager } = require('./binding');
 
 const activePromises = new Map();
-const finalizer = new FinalizationRegistry((nativeCache) => {
-  try {
-    nativeCache.dispose();
-  } catch (e) {
-    // Ignore errors during GC finalization
-  }
-});
 
 function wrapValue(val) {
   if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
@@ -116,7 +109,6 @@ class Cache {
       : 0;
       
     this._l1 = new Map();
-    finalizer.register(this, nativeCache, this);
   }
 
   _l1Set(key, value) {
@@ -305,7 +297,6 @@ class Cache {
 
   dispose() {
     this._l1.clear();
-    finalizer.unregister(this);
     this._native.dispose();
   }
 
@@ -350,13 +341,10 @@ class Cache {
   }
 }
 
-const activeManagers = new Set();
-
 class CacheManager {
   constructor(globalConfig = {}) {
     this._native = new NativeCacheManager();
     this._globalConfig = mergeConfigs(DEFAULT_CONFIG, normalizeConfig(globalConfig));
-    activeManagers.add(this);
   }
 
   createCache(name, config = {}) {
@@ -387,20 +375,9 @@ class CacheManager {
   }
 
   dispose() {
-    activeManagers.delete(this);
     this._native.clear();
   }
 }
-
-process.on('exit', () => {
-  for (const manager of activeManagers) {
-    try {
-      manager.dispose();
-    } catch (e) {
-      // Ignore cleanup failures on process exit
-    }
-  }
-});
 
 module.exports = {
   Cache,
