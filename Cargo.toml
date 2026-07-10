@@ -1,6 +1,6 @@
 [package]
 name = "offheap"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Ryan Gustavo"]
 license = "MIT OR Apache-2.0"
@@ -16,7 +16,7 @@ serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0.120"
 seahash = "4.1.0"
 rand = "0.8.5"
-mimalloc = "0.1.43"
+mimalloc = { version = "0.1.43", features = ["local_dynamic_tls"] }
 lz4_flex = "0.11.3"
 
 [build-dependencies]
@@ -27,6 +27,7 @@ lto = true
 opt-level = 3
 codegen-units = 1
 strip = true
+overflow-checks = true
 
 [[bench]]
 name = "rust_bench"

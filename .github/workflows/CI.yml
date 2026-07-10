@@ -9,6 +9,21 @@ on:
   pull_request:
 
 jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Run Cargo Audit
+        uses: actions-rust-lang/audit@v1
+      - name: Run NPM Audit
+        run: npm audit --omit=dev
+
   build:
     name: Build
     strategy:
@@ -18,21 +33,31 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             architecture: x64
+            test: true
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             architecture: x64
+            test: false
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             architecture: arm64
+            test: false
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            architecture: arm64
+            test: false
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             architecture: x64
+            test: true
           - host: macos-latest
             target: x86_64-apple-darwin
             architecture: x64
+            test: false
           - host: macos-latest
             target: aarch64-apple-darwin
             architecture: arm64
+            test: true
 
     runs-on: ${{ matrix.settings.host }}
 
@@ -47,12 +72,8 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install musl-tools
-        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
       - name: Install Zig
-        if: matrix.settings.target == 'aarch64-unknown-linux-musl'
+        if: contains(matrix.settings.target, 'musl') || contains(matrix.settings.target, 'aarch64-unknown-linux')
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.11.0
@@ -78,12 +99,23 @@ jobs:
 
       - name: Build
         run: |
-          if [[ "${{ matrix.settings.target }}" == "aarch64-unknown-linux-musl" ]]; then
+          if [[ "${{ matrix.settings.target }}" == *"aarch64-unknown-linux"* ]] || [[ "${{ matrix.settings.target }}" == *"musl"* ]]; then
             npm run build -- --target ${{ matrix.settings.target }} --zig
           else
             npm run build -- --target ${{ matrix.settings.target }}
           fi
         shell: bash
+
+      - name: Run tests
+        if: matrix.settings.test == true
+        run: npm test
+
+      - name: Run tests in Docker (Alpine Musl)
+        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
+        run: |
+          docker run --rm -v "$PWD:/app" -w /app node:20-alpine sh -c "
+            node -e \"const { CacheManager } = require('./index.js'); const m = new CacheManager(); const c = m.createCache('test', { capacity: 10 }); c.set('k', 'v'); console.log('Alpine Link OK:', c.get('k'));\"
+          "
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -91,14 +123,17 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: |
             *.node
-            index.js
-            index.d.ts
+            binding.js
+            binding.d.ts
           if-no-files-found: error
 
   publish:
     name: Publish
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
@@ -122,15 +157,20 @@ jobs:
 
       - name: Copy artifacts
         run: |
-          # Move artifacts to root
-          cp artifacts/bindings-*/*.node . || true
-          cp artifacts/bindings-*/index.js . || true
-          cp artifacts/bindings-*/index.d.ts . || true
+          npm run artifacts
+          cp artifacts/bindings-*/binding.js . || true
+          cp artifacts/bindings-*/binding.d.ts . || true
 
       - name: Prepublish
         run: npm run prepublishOnly
 
       - name: Publish to NPM
-        run: npm publish --access public
+        run: |
+          for pkg in npm/*; do
+            if [ -d "$pkg" ]; then
+              npm publish "$pkg" --access public || true
+            fi
+          done
+          npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

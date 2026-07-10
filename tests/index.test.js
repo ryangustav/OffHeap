@@ -89,7 +89,7 @@ test('Cache Policies - ARC adaptation & eviction', () => {
 test('Cache Policies - W-TinyLFU eviction competition', () => {
   const manager = new CacheManager();
   // Set shards: 1, l1Capacity: 0 to ensure a single native eviction pool of size 10
-  const cache = manager.createCache('tinylfu-evict', { policy: 'tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
+  const cache = manager.createCache('tinylfu-evict', { policy: 'w-tinylfu', capacity: 10, shards: 1, l1Capacity: 0 });
 
   // Fill cache
   for (let i = 0; i < 12; i++) {
@@ -547,12 +547,148 @@ test('Security - Key length safety limit and type validation', () => {
     cache.get(123);
   }, TypeError, /Key must be a string/);
 
-  // 2. Key must not exceed 8192 characters
+  // 2. Key must not exceed 8192 bytes
   const longKey = 'a'.repeat(8193);
   assert.throws(() => {
     cache.get(longKey);
-  }, RangeError, /Key length exceeds safety limit of 8192 characters/);
+  }, RangeError, /Key length exceeds safety limit of 8192 bytes/);
 
   cache.dispose();
   manager.dispose();
 });
+
+test('Security - Key size accounting in maxBytes and eviction proof', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('key-accounting-test', {
+    policy: 'lru',
+    capacity: 100,
+    maxBytes: 5000, // 5 KB limit
+    shards: 1,
+    l1Capacity: 0
+  });
+
+  const largeKey = 'k'.repeat(4000);
+  const tinyVal = '1234567890'; // 10 bytes payload + 1 byte tag = 11 bytes.
+  
+  cache.set(largeKey, tinyVal);
+
+  const stats1 = cache.stats();
+  // key (4000) + value (11) = 4011 bytes
+  assert.strictEqual(stats1.bytesUsed, 4011);
+
+  // Insert a second key of 2000 bytes.
+  // Total size (4011 + 2011 = 6022) exceeds 5000 maxBytes, triggering eviction of largeKey.
+  const secondKey = 'j'.repeat(2000);
+  cache.set(secondKey, tinyVal);
+
+  assert.strictEqual(cache.get(largeKey), undefined);
+  assert.strictEqual(cache.get(secondKey), tinyVal);
+
+  const stats2 = cache.stats();
+  assert.strictEqual(stats2.bytesUsed, 2011);
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache Policies - Eviction under multiple shards with randomized routing', () => {
+  const manager = new CacheManager();
+  // Total capacity = 20 across 4 shards (so each shard capacity = 5)
+  const cache = manager.createCache('multi-shard-evict-test', {
+    policy: 'lru',
+    capacity: 20,
+    shards: 4,
+    l1Capacity: 0
+  });
+
+  // Insert 40 keys. Evictions must occur because total capacity is exceeded.
+  const insertedKeys = [];
+  for (let i = 0; i < 40; i++) {
+    const key = `key-${i}`;
+    cache.set(key, `val-${i}`);
+    insertedKeys.push(key);
+  }
+
+  // Invariant 1: Total size across all shards is bounded by configured capacity (4 shards * 5 = 20)
+  const stats = cache.stats();
+  assert.ok(stats.size <= 20, `Total cache size (${stats.size}) should be bounded by capacity (20)`);
+
+  // Invariant 2: Any key that still exists in the cache must map to its correct value.
+  const keysInCache = cache.keys();
+  for (const key of keysInCache) {
+    const match = key.match(/^key-(\d+)$/);
+    assert.ok(match, `Key ${key} matches pattern`);
+    const index = match[1];
+    assert.strictEqual(cache.get(key), `val-${index}`);
+  }
+
+  cache.dispose();
+  manager.dispose();
+});
+
+test('Cache - Worker Threads Sharing', async () => {
+  const { Worker } = require('node:worker_threads');
+  
+  const manager = new CacheManager({
+    l1: { enabled: false } // Disable L1 for strict cross-thread consistency in this test
+  });
+  
+  // Create the shared cache in main thread
+  const cache = manager.createCache('shared-worker-cache', { policy: 'lru', capacity: 1000 });
+  cache.set('main-key', 'main-value');
+  
+  // Start concurrent worker threads to write and read
+  const workerCode = `
+    const { workerData, parentPort } = require('node:worker_threads');
+    const { CacheManager } = require('./index.js');
+    
+    const manager = new CacheManager({ l1: { enabled: false } });
+    const cache = manager.getCache('shared-worker-cache');
+    const threadId = workerData.threadId;
+    
+    for (let i = 0; i < 100; i++) {
+      cache.set(\`thread-\${threadId}-key-\${i}\`, \`value-\${i}\`);
+      const val = cache.get('main-key');
+      if (val !== 'main-value') {
+        throw new Error('Stale or missing main-key');
+      }
+    }
+    
+    parentPort.postMessage('done');
+  `;
+  
+  const spawnWorker = (threadId) => {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(workerCode, {
+        eval: true,
+        workerData: { threadId }
+      });
+      worker.on('message', resolve);
+      worker.on('error', reject);
+      worker.on('exit', (code) => {
+        if (code !== 0) reject(new Error(`Worker stopped with exit code ${code}`));
+      });
+    });
+  };
+  
+  // Spawn 4 concurrent worker threads
+  await Promise.all([
+    spawnWorker(1),
+    spawnWorker(2),
+    spawnWorker(3),
+    spawnWorker(4)
+  ]);
+  
+  // Verify main thread can read all values written by the workers
+  for (let t = 1; t <= 4; t++) {
+    for (let i = 0; i < 100; i++) {
+      assert.strictEqual(cache.get(`thread-${t}-key-${i}`), `value-${i}`);
+    }
+  }
+  
+  // Cleanup
+  manager.deleteCache('shared-worker-cache');
+  manager.dispose();
+});
+
+

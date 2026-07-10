@@ -81,8 +81,32 @@ To ensure high performance and transparent hit-rate optimization under varying w
    - *Paper: "ARC: A Self-Tuning, Low Overhead Replacement Cache" (FAST '03)*
    - Dynamically tunes allocation between recency ($T_1$) and frequency ($T_2$) via history/ghost lists.
 3. **Window TinyLFU (W-TinyLFU)**
-   - *Paper: "TinyLFU: A Highly Efficient Cache Admission Policy" (TDE '17)*
    - Utilizes a **4-bit Count-Min Sketch** frequency sketch (with a decay/reset aging policy). Combines a small Window LRU and a Segmented LRU Main Cache.
+
+### 🧵 Genuinely Shared State across Node.js Worker Threads
+
+One of OffHeap's most powerful architectural advantages is its ability to share L2 cache state **genuinely and directly across multiple V8 worker threads** within the same Node.js process:
+
+*   **The JS Limitation**: In pure JavaScript, sharing any state (like a `Map`) between `worker_threads` is impossible without serializing and cloning the data back and forth (via `postMessage`), incurring major CPU and latency overhead.
+*   **The OffHeap Solution**: Because OffHeap's L2 cache is allocated in native Rust memory using thread-safe pointers (`Arc<Mutex<...>>`) in a process-wide global registry, different worker threads calling `.getCache(name)` on their own `CacheManager` instances will point to the **exact same underlying memory buffer**.
+*   **Zero Serialization Overhead**: Key lookups and mutations read and write from/to the same shared native heap directly, making multi-threaded cache access virtually free of data-copying overhead.
+*   **Consistency Control**: 
+    *   **L1 Cache (Eventual Consistency)**: If L1 cache is enabled (default), each worker thread maintains a thread-local V8 Map of hot keys. This delivers maximum read throughput but may lead to temporary, eventual consistency across threads when keys are updated.
+    *   **L2-Only (Strict Consistency)**: For strict cross-thread read/write consistency, instantiate your caches with L1 disabled:
+        ```javascript
+        const manager = new CacheManager({
+          l1: { enabled: false } // Force all reads directly to shared L2
+        });
+        ```
+
+### Security & Memory Considerations
+
+*   **Physical Namespace Isolation vs. Collision Risk**:
+    *   Calling `CacheManager.createCache(name, config)` creates a physically isolated native `Cache` instance with its own shards and maps. Keys cannot collide across different namespace instances.
+    *   If developers choose to partition a single `Cache` instance manually (e.g., prefixing keys as `tenant_id + "::" + user_key`), they must sanitize/escape the `::` separator to prevent cross-tenant key collision vulnerabilities.
+*   **Memory Releasing & Zeroization**:
+    *   Evicted or deleted cache items are released back to the native `mimalloc` allocator.
+    *   OffHeap does **not** zero out (wipe) the memory bytes before returning the buffer to the allocator. If caching highly sensitive credentials (like passwords or tokens), implement application-layer encryption or zeroization before caching if secure memory wiping is required.
 
 ---
 
@@ -93,7 +117,7 @@ const { CacheManager } = require('./index.js');
 
 // 1. Global Config: Set defaults for all namespace caches
 const manager = new CacheManager({
-  eviction: { policy: 'tinylfu', capacity: 50000 },
+  eviction: { policy: 'w-tinylfu', capacity: 50000 },
   compression: { enabled: true, minSizeBytes: 1024 }, // LZ4 on JSON payloads >= 1KB
   l1: { enabled: true },
   ttl: { defaultMs: 1000 * 60 * 15 } // 15 mins default
