@@ -24,22 +24,48 @@ Instantiates a new central cache manager.
 Creates and returns an isolated cache instance.
 ```javascript
 const cache = manager.createCache('products', {
-  policy: 'w-tinylfu',
-  capacity: 10000,
   shards: 16,
-  maxBytes: 100 * 1024 * 1024 // 100 MB byte-capacity limit
+  eviction: {
+    policy: 'w-tinylfu',
+    capacity: 10000,
+    maxBytes: 100 * 1024 * 1024 // 100 MB byte-capacity limit
+  },
+  compression: {
+    enabled: true,
+    minSizeBytes: 1024
+  },
+  l1: {
+    enabled: true
+  },
+  ttl: {
+    defaultMs: 60000
+  }
 });
 ```
 * **Parameters**:
   * `name` (`string`): Unique name/namespace for the cache.
   * `config` (`CacheConfig`):
-    * `policy` (`"lru" | "arc" | "w-tinylfu" | "tinylfu"`): The eviction policy. `"w-tinylfu"` is the default and preferred policy name; `"tinylfu"` is accepted as an alias.
-    * `capacity` (`number`): The maximum number of entries allowed in the cache.
-    * `shards` (`number`, *optional*): Number of internal locks shards. High concurrency workloads benefit from larger shard numbers (e.g. 16 or 32). Default: `8`.
-    * `maxBytes` (`number`, *optional*): The maximum memory size of keys and values combined in bytes. When this threshold is crossed, entries are evicted according to the active policy.
+    * `shards` (`number`, *optional*): Number of internal lock shards. High concurrency workloads benefit from larger shard numbers (e.g. 16 or 32). Default: `8`.
+    * `eviction` (`object`, *optional*): Configuration for eviction and capacity limits:
+      * `policy` (`"lru" | "arc" | "w-tinylfu" | "tinylfu"`): The eviction policy. `"w-tinylfu"` is the default and preferred policy name; `"tinylfu"` is accepted as an alias.
+      * `capacity` (`number`): The maximum number of entries allowed in the cache. Default: `10000`.
+      * `maxBytes` (`number`, *optional*): The maximum memory size of keys and values combined in bytes. When this threshold is crossed, entries are evicted according to the active policy.
+    * `compression` (`object`, *optional*): Configuration for LZ4 compression:
+      * `enabled` (`boolean`): Enable or disable payload compression. Default: `false`.
+      * `algorithm` (`"lz4"`, *optional*): Compression algorithm to use. Default: `"lz4"`.
+      * `minSizeBytes` (`number`, *optional*): Min bytes size required to compress JSON payloads. Default: `1024` (1 KB).
     * `l1` (`object`, *optional*): Configures the fast JS-level L1 cache layer:
       * `enabled` (`boolean`): Enable or disable the V8-heap L1 layer. Default: `true`.
       * `capacity` (`number`, *optional*): Max L1 capacity. Default: 10% of L2 capacity (capped at `10000`).
+    * `ttl` (`object`, *optional*): Configures time-to-live settings:
+      * `defaultMs` (`number`, *optional*): Default expiration in milliseconds.
+      * `mode` (`"absolute" | "sliding"`, *optional*): Expiry mode. Default: `"absolute"`.
+    * **Legacy Compatibility Options** (can be defined directly at the root config object):
+      * `policy` (maps to `eviction.policy`)
+      * `capacity` (maps to `eviction.capacity`)
+      * `maxBytes` (maps to `eviction.maxBytes`)
+      * `l1Capacity` (maps to `l1.capacity`)
+      * `compressionEnabled` (maps to `compression.enabled`)
 * **Returns**: `Cache` instance.
 * **Throws**: Error if a cache with the specified `name` already exists.
 
@@ -82,15 +108,28 @@ const value = cache.get('prod_101');
   * Returns `object | array | number | boolean` if the value was stored as a JSON-serializable type.
   * Returns `undefined` if the key is missing or expired.
 
-### `set(key, value, ttl_ms?)`
+### `set(key, value, ttlMsOrOptions?)`
 Stores an entry in the cache. If the key already exists, its value is overwritten.
 ```javascript
-cache.set('key', { data: 'test' }, 60000); // Stores object with 60s TTL
+// A. Simple set with TTL (in milliseconds)
+cache.set('key', { data: 'test' }, 60000); 
+
+// B. Set with advanced options
+cache.set('key', { data: 'test' }, {
+  ttlMs: 60000,
+  compression: true,       // Force compression overrides
+  minSizeBytes: 512        // Compress JSON payload if >= 512 bytes
+});
 ```
 * **Parameters**:
   * `key` (`string`): The entry key.
   * `value` (`Buffer | Uint8Array | string | any`): The payload to store.
-  * `ttl_ms` (`number`, *optional*): The time-to-live in milliseconds. If omitted, the entry has no expiry.
+  * `ttlMsOrOptions` (`number | SetOptions`, *optional*):
+    * If passed as a `number`: The time-to-live in milliseconds.
+    * If passed as an `object` (`SetOptions`):
+      * `ttlMs` (`number`, *optional*): Time-to-live in milliseconds.
+      * `compression` (`boolean`, *optional*): Override global compression configuration for this key.
+      * `minSizeBytes` (`number`, *optional*): Minimum byte size override to compress.
 * **Returns**: `Buffer | string | object | undefined` (returns the old value if it was overwritten, or `undefined`).
 
 ### `has(key)`
