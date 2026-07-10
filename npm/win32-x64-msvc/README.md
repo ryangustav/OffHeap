@@ -1,3 +1,3 @@
-# `@ryangustav/offheap-win32-x64-msvc`
+# `@onlykgzin/offheap-win32-x64-msvc`
 
-This is the **x86_64-pc-windows-msvc** binary for `@ryangustav/offheap`
+This is the **x86_64-pc-windows-msvc** binary for `@onlykgzin/offheap`

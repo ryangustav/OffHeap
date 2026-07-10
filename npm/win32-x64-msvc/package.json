@@ -1,6 +1,6 @@
 {
-  "name": "@ryangustav/offheap-win32-x64-msvc",
-  "version": "0.3.9",
+  "name": "@onlykgzin/offheap-win32-x64-msvc",
+  "version": "0.3.10",
   "os": [
     "win32"
   ],
