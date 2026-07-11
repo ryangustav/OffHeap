@@ -323,6 +323,21 @@ class Cache {
       throw new TypeError('monitor() requires a callback function');
     }
 
+    // Compatibility guard: statsCounters() was added after some 0.4.0 binaries
+    // were published. Fall back to stats() for older native builds.
+    const hasStatsCounters = typeof this._native.statsCounters === 'function';
+    const hasStats = typeof this._native.stats === 'function';
+    if (!hasStatsCounters && !hasStats) {
+      throw new Error('Native cache does not support monitoring stats');
+    }
+
+    const _getCounters = hasStatsCounters
+      ? () => this._native.statsCounters()
+      : () => {
+          const s = this._native.stats();
+          return { hits: s.hits, misses: s.misses, sets: s.sets, deletes: s.deletes, evictions: s.evictions, expirations: s.expirations };
+        };
+
     const HARD_FLOOR = 16;
     const configuredMin = (this._config.monitoring && this._config.monitoring.minIntervalMs) !== undefined
       ? this._config.monitoring.minIntervalMs
@@ -341,12 +356,12 @@ class Cache {
       );
     }
 
-    let prev = this._native.statsCounters();
+    let prev = _getCounters();
     let prevTime = Date.now();
 
     const timer = setInterval(() => {
       const now = Date.now();
-      const curr = this._native.statsCounters();
+      const curr = _getCounters();
       const elapsed = (now - prevTime) / 1000;
 
       const delta = {
