@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::{CacheImpl, CacheEntry, CacheStats};
+use super::{CacheImpl, CacheEntry, CacheStats, Eviction};
 
 // Count-Min Sketch with 4-bit counters and aging.
 // Sized dynamically relative to cache capacity.
@@ -150,6 +150,8 @@ pub struct TinyLfuCache {
     sketch: FrequencySketch,
     hits: u64,
     misses: u64,
+    evictions: u64,
+    expirations: u64,
 }
 
 impl TinyLfuCache {
@@ -182,6 +184,8 @@ impl TinyLfuCache {
             sketch: FrequencySketch::new(capacity),
             hits: 0,
             misses: 0,
+            evictions: 0,
+            expirations: 0,
         }
     }
 
@@ -239,7 +243,7 @@ impl TinyLfuCache {
         meta.len += 1;
     }
 
-    fn remove_completely(&mut self, idx: usize, already_detached: bool) -> String {
+    fn remove_completely(&mut self, idx: usize, already_detached: bool) -> (String, CacheEntry) {
         let bytes = self.node_bytes(idx);
         self.bytes_used -= bytes;
         if !already_detached {
@@ -247,21 +251,26 @@ impl TinyLfuCache {
         }
         self.free_nodes.push(idx);
         let key = std::mem::take(&mut self.nodes[idx].key);
-        self.nodes[idx].entry = CacheEntry::new(Vec::new(), None);
-        key
+        let entry = std::mem::replace(&mut self.nodes[idx].entry, CacheEntry::new(Vec::new(), None));
+        (key, entry)
     }
 }
 
 impl CacheImpl for TinyLfuCache {
-    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn get(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         self.sketch.increment(key);
 
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx, false);
+                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 self.misses += 1;
-                None
+                self.expirations += 1;
+                (None, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 let list = self.nodes[idx].list;
                 match list {
@@ -286,51 +295,62 @@ impl CacheImpl for TinyLfuCache {
                     }
                 }
                 self.hits += 1;
-                Some(self.nodes[idx].entry.value.clone())
+                (Some(self.nodes[idx].entry.value.clone()), None)
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn peek(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx, false);
+                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
                 self.misses += 1;
-                None
+                self.expirations += 1;
+                (None, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 self.hits += 1;
-                Some(self.nodes[idx].entry.value.clone())
+                (Some(self.nodes[idx].entry.value.clone()), None)
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn has(&mut self, key: &str) -> bool {
+    fn has(&mut self, key: &str) -> (bool, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx, false);
+                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
-                false
+                self.expirations += 1;
+                (false, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
-                true
+                (true, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
         self.sketch.increment(key);
 
         let new_entry = CacheEntry::new(value, ttl_ms);
         let new_bytes = key.len() + new_entry.value.len();
         let mut old_value = None;
+        let mut evictions: Option<Vec<Eviction>> = None;
 
         if let Some(&idx) = self.map.get(key) {
             let old_bytes = self.node_bytes(idx);
@@ -361,7 +381,7 @@ impl CacheImpl for TinyLfuCache {
             }
         } else {
             if self.capacity == 0 {
-                return None;
+                return (None, None);
             }
 
             let new_idx = if let Some(free_idx) = self.free_nodes.pop() {
@@ -405,20 +425,38 @@ impl CacheImpl for TinyLfuCache {
                                 let victim_freq = self.sketch.estimate(victim_key);
 
                                 if candidate_freq > victim_freq {
-                                    let evicted_key = self.remove_completely(victim_idx, false);
+                                    let (evicted_key, evicted_entry) = self.remove_completely(victim_idx, false);
                                     self.map.remove(&evicted_key);
                                     self.attach_to_head(candidate_idx, TinyLfuList::Probation);
+                                    self.evictions += 1;
+                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
+                                        key: evicted_key,
+                                        value: evicted_entry.value,
+                                        reason: "evicted".to_string(),
+                                    });
                                 } else {
-                                    let evicted_key = self.remove_completely(candidate_idx, true);
+                                    let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
                                     self.map.remove(&evicted_key);
+                                    self.evictions += 1;
+                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
+                                        key: evicted_key,
+                                        value: evicted_entry.value,
+                                        reason: "evicted".to_string(),
+                                    });
                                 }
                             } else {
                                 self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                             }
                         }
                     } else {
-                        let evicted_key = self.remove_completely(candidate_idx, true);
+                        let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
                         self.map.remove(&evicted_key);
+                        self.evictions += 1;
+                        evictions.get_or_insert_with(Vec::new).push(Eviction {
+                            key: evicted_key,
+                            value: evicted_entry.value,
+                            reason: "evicted".to_string(),
+                        });
                     }
                 }
             }
@@ -427,26 +465,43 @@ impl CacheImpl for TinyLfuCache {
         if let Some(max) = self.max_bytes {
             while self.bytes_used > max && (self.probation.len > 0 || self.window.len > 0) {
                 if let Some(prob_tail) = self.probation.tail {
-                    let evicted_key = self.remove_completely(prob_tail, false);
+                    let (evicted_key, evicted_entry) = self.remove_completely(prob_tail, false);
                     self.map.remove(&evicted_key);
+                    self.evictions += 1;
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
+                        key: evicted_key,
+                        value: evicted_entry.value,
+                        reason: "evicted".to_string(),
+                    });
                 } else if let Some(win_tail) = self.window.tail {
-                    let evicted_key = self.remove_completely(win_tail, false);
+                    let (evicted_key, evicted_entry) = self.remove_completely(win_tail, false);
                     self.map.remove(&evicted_key);
+                    self.evictions += 1;
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
+                        key: evicted_key,
+                        value: evicted_entry.value,
+                        reason: "evicted".to_string(),
+                    });
                 } else {
                     break;
                 }
             }
         }
 
-        old_value
+        (old_value, evictions)
     }
 
-    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             if self.nodes[idx].entry.is_expired() {
-                let evicted_key = self.remove_completely(idx, false);
+                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
                 self.map.remove(&evicted_key);
-                false
+                self.expirations += 1;
+                (false, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 self.nodes[idx].entry = CacheEntry::new(
                     self.nodes[idx].entry.value.clone(),
@@ -455,10 +510,10 @@ impl CacheImpl for TinyLfuCache {
                 let list = self.nodes[idx].list;
                 self.detach(idx);
                 self.attach_to_head(idx, list);
-                true
+                (true, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
@@ -487,6 +542,8 @@ impl CacheImpl for TinyLfuCache {
         self.protected.len = 0;
         self.hits = 0;
         self.misses = 0;
+        self.evictions = 0;
+        self.expirations = 0;
         self.sketch.table.fill(0);
         self.sketch.additions = 0;
         self.bytes_used = 0;
@@ -499,6 +556,8 @@ impl CacheImpl for TinyLfuCache {
             capacity: self.capacity,
             size: self.window.len + self.probation.len + self.protected.len,
             bytes_used: self.bytes_used,
+            evictions: self.evictions,
+            expirations: self.expirations,
         }
     }
 
@@ -549,8 +608,8 @@ mod tests {
 
         // Increase frequency of key-0 and key-1
         for _ in 0..3 {
-            cache.get("key-0");
-            cache.get("key-1");
+            let _ = cache.get("key-0");
+            let _ = cache.get("key-1");
         }
 
         // Add a new key. TinyLFU will compare frequency of candidate vs probation victim.
@@ -558,7 +617,7 @@ mod tests {
         cache.set("key-5", vec![5], None);
         
         // key-0 and key-1 must remain because of high frequency.
-        assert!(cache.get("key-0").is_some());
-        assert!(cache.get("key-1").is_some());
+        assert!(cache.get("key-0").0.is_some());
+        assert!(cache.get("key-1").0.is_some());
     }
 }

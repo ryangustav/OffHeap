@@ -237,7 +237,7 @@ Returns an array of all active (non-expired) keys in the cache.
 * **Returns**: `string[]`
 
 ### `stats()`
-Returns telemetry statistics for the cache.
+Returns enriched telemetry statistics for the cache, incorporating lock-free lifetime counters, a shard load analysis, process RSS memory telemetry, and L1 cache layer usage.
 ```javascript
 const telemetry = cache.stats();
 // Telemetry format:
@@ -246,15 +246,71 @@ const telemetry = cache.stats();
 //   misses: 92,
 //   capacity: 10000,
 //   size: 4210,
-//   bytesUsed: 541029 // total size of keys + values in bytes
+//   bytesUsed: 541029,
+//   sets: 1544,
+//   deletes: 54,
+//   evictions: 12,
+//   expirations: 30,
+//   hitRate: 0.9404,
+//   uptimeMs: 125000,
+//   shards: {
+//     count: 8,
+//     details: [
+//       { size: 526, bytesUsed: 67320 },
+//       ...
+//     ],
+//     sizeStdDev: 12.4
+//   },
+//   memory: {
+//     payloadBytes: 541029,     // raw sum of off-heap key + value payloads
+//     processRss: 124928300     // overall process RSS memory footprint (bytes)
+//   },
+//   l1: {
+//     size: 421,
+//     capacity: 1000
+//   }
 // }
 ```
 * **Returns**: `CacheStats` object:
   * `hits` (`number`): Number of successful read queries.
   * `misses` (`number`): Number of queries for missing or expired keys.
-  * `capacity` (`number`): Sized capacity.
+  * `capacity` (`number`): Cache-wide capacity limit.
   * `size` (`number`): Current count of active entries.
-  * `bytesUsed` (`number`): Current byte-capacity usage of stored keys and values.
+  * `bytesUsed` (`number`): Current byte-capacity usage of stored keys and values (same as `payloadBytes`).
+  * `sets` (`number`): Lifetime set operations.
+  * `deletes` (`number`): Lifetime delete operations.
+  * `evictions` (`number`): Lifetime capacity and memory size policy eviction events.
+  * `expirations` (`number`): Lifetime lazy expiration events.
+  * `hitRate` (`number`): Cache hit rate (between `0` and `1`).
+  * `uptimeMs` (`number`): Uptime of this cache instance in milliseconds.
+  * `shards` (`object`): Shard statistics breakdown:
+    * `count` (`number`): Number of internal locks shards.
+    * `details` (`object[]`): Array containing the `{ size, bytesUsed }` load of each shard.
+    * `sizeStdDev` (`number`): The standard deviation of the entry counts across all shards. A high value suggests hashing imbalance or key pattern collisions.
+  * `memory` (`object`): Memory footprint metrics:
+    * `payloadBytes` (`number`): Theoretical memory allocated for key and value payloads.
+    * `processRss` (`number`): System resident set size (RSS) memory footprint of the Node.js process (useful to compare payload consumption vs native memory pool allocation/fragmentation).
+  * `l1` (`object`): JS L1 cache layer usage:
+    * `size` (`number`): Current number of items in the V8 heap L1 cache.
+    * `capacity` (`number`): Capacity limit of the L1 cache.
+
+### `monitor(callback, intervalMs?)`
+Initiates a pull-based background poller that tracks real-time statistics changes (deltas and operation rates) without blocking the hot path.
+```javascript
+const stop = cache.monitor((snapshot) => {
+  console.log(`Operations per second: ${snapshot.rates.opsPerSec}`);
+  console.log(`Cache Hit Rate: ${snapshot.rates.hitRate}`);
+}, 1000); // Poll metrics every 1 second
+
+// Stop monitoring when done
+stop();
+```
+* **Parameters**:
+  * `callback` (`(snapshot: StatusSnapshot) => void`): Callback triggered on every polling interval.
+  * `intervalMs` (`number`, *optional*): Real-time polling frequency in milliseconds. 
+    * Inherits the soft floor `minIntervalMs` from the configuration (defaulting to `500ms`).
+    * Rejects intervals below the hard safety floor limit of `16ms` (throwing a `RangeError`).
+* **Returns**: `() => void` (a disposer function to stop the background monitor timer).
 
 ### `dispose()`
 Explicitly disposes of the native sub-caches immediately, freeing all of its memory back to the OS.

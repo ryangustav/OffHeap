@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::collections::hash_map::RandomState;
 use std::hash::{Hash, Hasher, BuildHasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use napi::{Env, JsUnknown, JsBuffer, JsString, JsObject, Result, ValueType};
 use super::algorithms::{CacheImpl, lru::LruCache, arc::ArcCache, tinylfu::TinyLfuCache};
 
@@ -14,12 +16,35 @@ pub struct CacheConfig {
 }
 
 #[napi(object)]
+pub struct ShardStatsJs {
+    pub size: f64,
+    pub bytes_used: f64,
+}
+
+#[napi(object)]
 pub struct CacheStatsJs {
     pub hits: f64,
     pub misses: f64,
     pub capacity: f64,
     pub size: f64,
     pub bytes_used: f64,
+    pub sets: f64,
+    pub deletes: f64,
+    pub evictions: f64,
+    pub expirations: f64,
+    pub hit_rate: f64,
+    pub uptime_ms: f64,
+    pub shards: Vec<ShardStatsJs>,
+}
+
+#[napi(object)]
+pub struct CacheCountersJs {
+    pub hits: f64,
+    pub misses: f64,
+    pub sets: f64,
+    pub deletes: f64,
+    pub evictions: f64,
+    pub expirations: f64,
 }
 
 #[napi]
@@ -28,6 +53,13 @@ pub struct Cache {
     compression: bool,
     hasher: Arc<RandomState>,
     max_bytes: Option<usize>,
+    atomic_hits: Arc<AtomicU64>,
+    atomic_misses: Arc<AtomicU64>,
+    atomic_sets: Arc<AtomicU64>,
+    atomic_deletes: Arc<AtomicU64>,
+    atomic_evictions: Arc<AtomicU64>,
+    atomic_expirations: Arc<AtomicU64>,
+    created_at: Arc<Instant>,
 }
 
 impl Clone for Cache {
@@ -37,6 +69,13 @@ impl Clone for Cache {
             compression: self.compression,
             hasher: Arc::clone(&self.hasher),
             max_bytes: self.max_bytes,
+            atomic_hits: Arc::clone(&self.atomic_hits),
+            atomic_misses: Arc::clone(&self.atomic_misses),
+            atomic_sets: Arc::clone(&self.atomic_sets),
+            atomic_deletes: Arc::clone(&self.atomic_deletes),
+            atomic_evictions: Arc::clone(&self.atomic_evictions),
+            atomic_expirations: Arc::clone(&self.atomic_expirations),
+            created_at: Arc::clone(&self.created_at),
         }
     }
 }
@@ -64,7 +103,19 @@ impl Cache {
 
         let hasher = Arc::new(RandomState::new());
 
-        Self { shards, compression, hasher, max_bytes }
+        Self {
+            shards,
+            compression,
+            hasher,
+            max_bytes,
+            atomic_hits: Arc::new(AtomicU64::new(0)),
+            atomic_misses: Arc::new(AtomicU64::new(0)),
+            atomic_sets: Arc::new(AtomicU64::new(0)),
+            atomic_deletes: Arc::new(AtomicU64::new(0)),
+            atomic_evictions: Arc::new(AtomicU64::new(0)),
+            atomic_expirations: Arc::new(AtomicU64::new(0)),
+            created_at: Arc::new(Instant::now()),
+        }
     }
 
     fn get_shard(&self, key: &str) -> Result<Arc<parking_lot::Mutex<Option<Box<dyn CacheImpl>>>>> {
@@ -238,13 +289,25 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        let res = if let Some(bytes) = cache.get(&key) {
-            self.deserialize_value(env, bytes)
-        } else {
-            Ok(env.get_undefined()?.into_unknown())
-        };
+        let (bytes, eviction) = cache.get(&key);
         *lock = Some(cache);
-        res
+        
+        if let Some(b) = bytes {
+            self.atomic_hits.fetch_add(1, Ordering::Relaxed);
+            self.deserialize_value(env, b)
+        } else if let Some(ev) = eviction {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            self.atomic_expirations.fetch_add(1, Ordering::Relaxed);
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_undefined()?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
@@ -254,28 +317,56 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        let res = if let Some(bytes) = cache.peek(&key) {
-            self.deserialize_value(env, bytes)
-        } else {
-            Ok(env.get_undefined()?.into_unknown())
-        };
+        let (bytes, eviction) = cache.peek(&key);
         *lock = Some(cache);
-        res
+        
+        if let Some(b) = bytes {
+            self.atomic_hits.fetch_add(1, Ordering::Relaxed);
+            self.deserialize_value(env, b)
+        } else if let Some(ev) = eviction {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            self.atomic_expirations.fetch_add(1, Ordering::Relaxed);
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_undefined()?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
-    pub fn has(&self, key: String) -> Result<bool> {
+    pub fn has(&self, env: Env, key: String) -> Result<JsUnknown> {
         validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        let res = cache.has(&key);
+        let (has_key, eviction) = cache.has(&key);
         *lock = Some(cache);
-        Ok(res)
+        
+        if has_key {
+            self.atomic_hits.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_boolean(true)?.into_unknown())
+        } else if let Some(ev) = eviction {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            self.atomic_expirations.fetch_add(1, Ordering::Relaxed);
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_boolean(false)?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<JsUnknown> {
         validate_key(&key)?;
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
@@ -283,21 +374,95 @@ impl Cache {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        cache.set(&key, bytes, ttl);
+        let (old_val, evs) = cache.set(&key, bytes, ttl);
         *lock = Some(cache);
-        Ok(())
+        
+        self.atomic_sets.fetch_add(1, Ordering::Relaxed);
+        
+        let mut replaced_count = 0;
+        let mut evicted_count = 0;
+        let mut expired_count = 0;
+        
+        if old_val.is_some() {
+            replaced_count += 1;
+        }
+        if let Some(ref evs_list) = evs {
+            for ev in evs_list {
+                if ev.reason == "expired" {
+                    expired_count += 1;
+                } else {
+                    evicted_count += 1;
+                }
+            }
+        }
+        
+        if replaced_count > 0 {
+            self.atomic_evictions.fetch_add(replaced_count, Ordering::Relaxed);
+        }
+        if evicted_count > 0 {
+            self.atomic_evictions.fetch_add(evicted_count, Ordering::Relaxed);
+        }
+        if expired_count > 0 {
+            self.atomic_expirations.fetch_add(expired_count, Ordering::Relaxed);
+        }
+        
+        if old_val.is_none() && evs.is_none() {
+            return Ok(env.get_undefined()?.into_unknown());
+        }
+
+        let mut all_evictions = Vec::new();
+        if let Some(old) = old_val {
+            let mut ev_obj = env.create_object()?;
+            ev_obj.set_named_property("key", env.create_string(&key)?)?;
+            let val_js = self.deserialize_value(env, old)?;
+            ev_obj.set_named_property("value", val_js)?;
+            ev_obj.set_named_property("reason", env.create_string("replaced")?)?;
+            all_evictions.push(ev_obj.into_unknown());
+        }
+        if let Some(evs_list) = evs {
+            for ev in evs_list {
+                let mut ev_obj = env.create_object()?;
+                ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
+                let val_js = self.deserialize_value(env, ev.value)?;
+                ev_obj.set_named_property("value", val_js)?;
+                ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
+                all_evictions.push(ev_obj.into_unknown());
+            }
+        }
+        
+        let mut js_arr = env.create_array_with_length(all_evictions.len())?;
+        for (i, val) in all_evictions.into_iter().enumerate() {
+            js_arr.set_element(i as u32, val)?;
+        }
+        Ok(js_arr.into_unknown())
     }
 
     #[napi(catch_unwind)]
-    pub fn touch(&self, key: String, ttl_ms: Option<f64>) -> Result<bool> {
+    pub fn touch(&self, env: Env, key: String, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         validate_key(&key)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        let res = cache.touch(&key, ttl);
+        let (res, eviction) = cache.touch(&key, ttl);
         *lock = Some(cache);
-        Ok(res)
+        
+        if res {
+            self.atomic_hits.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_boolean(true)?.into_unknown())
+        } else if let Some(ev) = eviction {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            self.atomic_expirations.fetch_add(1, Ordering::Relaxed);
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            Ok(env.get_boolean(false)?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
@@ -308,6 +473,9 @@ impl Cache {
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         let res = cache.delete(&key);
         *lock = Some(cache);
+        if res {
+            self.atomic_deletes.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(res)
     }
 
@@ -324,29 +492,62 @@ impl Cache {
 
     #[napi(catch_unwind)]
     pub fn stats(&self) -> Result<CacheStatsJs> {
-        let mut total_hits = 0.0;
-        let mut total_misses = 0.0;
+        let hits = self.atomic_hits.load(Ordering::Relaxed);
+        let misses = self.atomic_misses.load(Ordering::Relaxed);
+        let sets = self.atomic_sets.load(Ordering::Relaxed);
+        let deletes = self.atomic_deletes.load(Ordering::Relaxed);
+        let evictions = self.atomic_evictions.load(Ordering::Relaxed);
+        let expirations = self.atomic_expirations.load(Ordering::Relaxed);
+
+        let total = hits + misses;
+        let hit_rate = if total > 0 { hits as f64 / total as f64 } else { 0.0 };
+
         let mut total_capacity = 0.0;
         let mut total_size = 0.0;
         let mut total_bytes = 0.0;
+        let mut shards_stats = Vec::with_capacity(self.shards.len());
         
         for shard_lock in &self.shards {
             let lock = shard_lock.lock();
             let cache = lock.as_ref().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             let stats = cache.stats();
-            total_hits += stats.hits as f64;
-            total_misses += stats.misses as f64;
             total_capacity += stats.capacity as f64;
             total_size += stats.size as f64;
             total_bytes += stats.bytes_used as f64;
+            
+            shards_stats.push(ShardStatsJs {
+                size: stats.size as f64,
+                bytes_used: stats.bytes_used as f64,
+            });
         }
+
+        let uptime_ms = self.created_at.elapsed().as_millis() as f64;
         
         Ok(CacheStatsJs {
-            hits: total_hits,
-            misses: total_misses,
+            hits: hits as f64,
+            misses: misses as f64,
             capacity: total_capacity,
             size: total_size,
             bytes_used: total_bytes,
+            sets: sets as f64,
+            deletes: deletes as f64,
+            evictions: evictions as f64,
+            expirations: expirations as f64,
+            hit_rate,
+            uptime_ms,
+            shards: shards_stats,
+        })
+    }
+
+    #[napi(catch_unwind)]
+    pub fn stats_counters(&self) -> Result<CacheCountersJs> {
+        Ok(CacheCountersJs {
+            hits: self.atomic_hits.load(Ordering::Relaxed) as f64,
+            misses: self.atomic_misses.load(Ordering::Relaxed) as f64,
+            sets: self.atomic_sets.load(Ordering::Relaxed) as f64,
+            deletes: self.atomic_deletes.load(Ordering::Relaxed) as f64,
+            evictions: self.atomic_evictions.load(Ordering::Relaxed) as f64,
+            expirations: self.atomic_expirations.load(Ordering::Relaxed) as f64,
         })
     }
 
@@ -377,10 +578,13 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
+        let mut is_hit = false;
         let mut run = || -> Result<JsUnknown> {
             let mut current_val = 0i64;
             
-            if let Some(bytes) = cache.get(&key) {
+            let (bytes_opt, _eviction) = cache.get(&key);
+            if let Some(bytes) = bytes_opt {
+                is_hit = true;
                 if !bytes.is_empty() {
                     let tag = bytes[0];
                     let payload = &bytes[1..];
@@ -412,7 +616,7 @@ impl Cache {
             new_bytes.extend_from_slice(&new_val.to_ne_bytes());
             
             let ttl = ttl_ms.map(|ms| ms as u64);
-            cache.set(&key, new_bytes, ttl);
+            let _ = cache.set(&key, new_bytes, ttl);
             
             let js_num = env.create_double(new_val as f64)?;
             Ok(js_num.into_unknown())
@@ -420,6 +624,15 @@ impl Cache {
 
         let res = run();
         *lock = Some(cache);
+        
+        if res.is_ok() {
+            if is_hit {
+                self.atomic_hits.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.atomic_misses.fetch_add(1, Ordering::Relaxed);
+            }
+            self.atomic_sets.fetch_add(1, Ordering::Relaxed);
+        }
         res
     }
 
@@ -431,28 +644,61 @@ impl Cache {
     #[napi(catch_unwind)]
     pub fn mget(&self, env: Env, keys: Vec<String>) -> Result<Vec<JsUnknown>> {
         let mut result = Vec::with_capacity(keys.len());
+        let mut hits = 0;
+        let mut misses = 0;
+        let mut expirations = 0;
+        
         for key in keys {
             validate_key(&key)?;
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             
-            let val_res = if let Some(bytes) = cache.get(&key) {
-                self.deserialize_value(env, bytes)
+            let (bytes, eviction) = cache.get(&key);
+            let val_res = if let Some(b) = bytes {
+                hits += 1;
+                self.deserialize_value(env, b)
+            } else if let Some(ev) = eviction {
+                misses += 1;
+                expirations += 1;
+                let mut obj = env.create_object()?;
+                obj.set_named_property("__expired", env.get_boolean(true)?)?;
+                obj.set_named_property("key", env.create_string(&ev.key)?)?;
+                let val_js = self.deserialize_value(env, ev.value)?;
+                obj.set_named_property("value", val_js)?;
+                Ok(obj.into_unknown())
             } else {
+                misses += 1;
                 Ok(env.get_undefined()?.into_unknown())
             };
             *lock = Some(cache);
             result.push(val_res?);
         }
+        
+        if hits > 0 {
+            self.atomic_hits.fetch_add(hits, Ordering::Relaxed);
+        }
+        if misses > 0 {
+            self.atomic_misses.fetch_add(misses, Ordering::Relaxed);
+        }
+        if expirations > 0 {
+            self.atomic_expirations.fetch_add(expirations, Ordering::Relaxed);
+        }
+        
         Ok(result)
     }
 
     #[napi(catch_unwind)]
-    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<()> {
+    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         let keys_array = entries.get_property_names()?;
         let len = keys_array.get_array_length()?;
         let ttl = ttl_ms.map(|ms| ms as u64);
+        let mut collected_evictions = Vec::new();
+        
+        let mut sets = 0;
+        let mut replaced_count = 0;
+        let mut evicted_count = 0;
+        let mut expired_count = 0;
         
         for i in 0..len {
             let key_unknown: JsUnknown = keys_array.get_element(i)?;
@@ -466,10 +712,61 @@ impl Cache {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-            cache.set(&key, bytes, ttl);
+            let (old_val, evs) = cache.set(&key, bytes, ttl);
             *lock = Some(cache);
+            
+            sets += 1;
+            if old_val.is_some() {
+                replaced_count += 1;
+            }
+            if let Some(ref evs_list) = evs {
+                for ev in evs_list {
+                    if ev.reason == "expired" {
+                        expired_count += 1;
+                    } else {
+                        evicted_count += 1;
+                    }
+                }
+            }
+            
+            if let Some(old) = old_val {
+                collected_evictions.push((key, old, "replaced".to_string()));
+            }
+            if let Some(evs_list) = evs {
+                for ev in evs_list {
+                    collected_evictions.push((ev.key, ev.value, ev.reason));
+                }
+            }
         }
-        Ok(())
+        
+        if sets > 0 {
+            self.atomic_sets.fetch_add(sets, Ordering::Relaxed);
+        }
+        if replaced_count > 0 {
+            self.atomic_evictions.fetch_add(replaced_count, Ordering::Relaxed);
+        }
+        if evicted_count > 0 {
+            self.atomic_evictions.fetch_add(evicted_count, Ordering::Relaxed);
+        }
+        if expired_count > 0 {
+            self.atomic_expirations.fetch_add(expired_count, Ordering::Relaxed);
+        }
+        
+        if collected_evictions.is_empty() {
+            return Ok(env.get_undefined()?.into_unknown());
+        }
+
+        let mut js_arr = env.create_array_with_length(collected_evictions.len())?;
+        for (i, (key, value, reason)) in collected_evictions.into_iter().enumerate() {
+            let mut ev_obj = env.create_object()?;
+            ev_obj.set_named_property("key", env.create_string(&key)?)?;
+            let val_js = self.deserialize_value(env, value)?;
+            ev_obj.set_named_property("value", val_js)?;
+            ev_obj.set_named_property("reason", env.create_string(&reason)?)?;
+            js_arr.set_element(i as u32, ev_obj.into_unknown())?;
+        }
+        
+        Ok(js_arr.into_unknown())
     }
 
     #[napi(catch_unwind)]
@@ -485,6 +782,9 @@ impl Cache {
             if deleted {
                 count += 1;
             }
+        }
+        if count > 0 {
+            self.atomic_deletes.fetch_add(count as u64, Ordering::Relaxed);
         }
         Ok(count)
     }

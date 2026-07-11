@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::{CacheImpl, CacheEntry, CacheStats};
+use super::{CacheImpl, CacheEntry, CacheStats, Eviction};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum ArcList {
@@ -49,6 +49,8 @@ pub struct ArcCache {
     p: usize, // Target size for T1
     hits: u64,
     misses: u64,
+    evictions: u64,
+    expirations: u64,
 }
 
 impl ArcCache {
@@ -71,6 +73,8 @@ impl ArcCache {
             p: 0,
             hits: 0,
             misses: 0,
+            evictions: 0,
+            expirations: 0,
         }
     }
 
@@ -134,143 +138,194 @@ impl ArcCache {
         meta.len += 1;
     }
 
-    fn remove_completely(&mut self, idx: usize) -> String {
+    fn remove_completely(&mut self, idx: usize) -> (String, Option<CacheEntry>) {
         let bytes = self.node_bytes(idx);
         self.bytes_used -= bytes;
         self.detach(idx);
         self.free_nodes.push(idx);
         let key = std::mem::take(&mut self.nodes[idx].key);
-        self.nodes[idx].value = None;
-        key
+        let val = self.nodes[idx].value.take();
+        (key, val)
     }
 
-    fn replace(&mut self, key_in_b2: bool) {
+    fn replace(&mut self, key_in_b2: bool) -> Option<Eviction> {
         if self.t1.len > 0 && (self.t1.len > self.p || (key_in_b2 && self.t1.len == self.p)) {
             if let Some(t1_tail) = self.t1.tail {
                 let bytes = self.node_bytes(t1_tail);
                 self.bytes_used -= bytes;
                 self.detach(t1_tail);
-                self.nodes[t1_tail].value = None; // Evict value from memory
+                let entry = self.nodes[t1_tail].value.take(); // Evict value from memory
                 self.attach_to_head(t1_tail, ArcList::B1);
+                if let Some(e) = entry {
+                    self.evictions += 1;
+                    return Some(Eviction {
+                        key: self.nodes[t1_tail].key.clone(),
+                        value: e.value,
+                        reason: "evicted".to_string(),
+                    });
+                }
             }
         } else {
             if let Some(t2_tail) = self.t2.tail {
                 let bytes = self.node_bytes(t2_tail);
                 self.bytes_used -= bytes;
                 self.detach(t2_tail);
-                self.nodes[t2_tail].value = None; // Evict value from memory
+                let entry = self.nodes[t2_tail].value.take(); // Evict value from memory
                 self.attach_to_head(t2_tail, ArcList::B2);
+                if let Some(e) = entry {
+                    self.evictions += 1;
+                    return Some(Eviction {
+                        key: self.nodes[t2_tail].key.clone(),
+                        value: e.value,
+                        reason: "evicted".to_string(),
+                    });
+                }
             }
         }
+        None
     }
 }
 
 impl CacheImpl for ArcCache {
-    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn get(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
             match list {
                 ArcList::T1 | ArcList::T2 => {
                     let expired = self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired());
                     if expired {
-                        self.remove_completely(idx);
-                        self.map.remove(key);
+                        let (ev_key, entry) = self.remove_completely(idx);
+                        self.map.remove(&ev_key);
                         self.misses += 1;
-                        None
+                        self.expirations += 1;
+                        let value = entry.map(|e| e.value).unwrap_or_default();
+                        (None, Some(Eviction {
+                            key: ev_key,
+                            value,
+                            reason: "expired".to_string(),
+                        }))
                     } else {
                         self.detach(idx);
                         self.attach_to_head(idx, ArcList::T2);
                         self.hits += 1;
-                        self.nodes[idx].value.as_ref().map(|e| e.value.clone())
+                        (self.nodes[idx].value.as_ref().map(|e| e.value.clone()), None)
                     }
                 }
                 ArcList::B1 | ArcList::B2 => {
                     self.misses += 1;
-                    None
+                    (None, None)
                 }
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn peek(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
             match list {
                 ArcList::T1 | ArcList::T2 => {
                     let expired = self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired());
                     if expired {
-                        self.remove_completely(idx);
-                        self.map.remove(key);
+                        let (ev_key, entry) = self.remove_completely(idx);
+                        self.map.remove(&ev_key);
                         self.misses += 1;
-                        None
+                        self.expirations += 1;
+                        let value = entry.map(|e| e.value).unwrap_or_default();
+                        (None, Some(Eviction {
+                            key: ev_key,
+                            value,
+                            reason: "expired".to_string(),
+                        }))
                     } else {
                         self.hits += 1;
-                        self.nodes[idx].value.as_ref().map(|e| e.value.clone())
+                        (self.nodes[idx].value.as_ref().map(|e| e.value.clone()), None)
                     }
                 }
                 _ => {
                     self.misses += 1;
-                    None
+                    (None, None)
                 }
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn has(&mut self, key: &str) -> bool {
+    fn has(&mut self, key: &str) -> (bool, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
             match list {
                 ArcList::T1 | ArcList::T2 => {
                     let expired = self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired());
                     if expired {
-                        self.remove_completely(idx);
-                        self.map.remove(key);
-                        false
+                        let (ev_key, entry) = self.remove_completely(idx);
+                        self.map.remove(&ev_key);
+                        let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
+                        (false, Some(Eviction {
+                            key: ev_key,
+                            value,
+                            reason: "expired".to_string(),
+                        }))
                     } else {
-                        true
+                        (true, None)
                     }
                 }
-                _ => false
+                _ => (false, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
         if self.capacity == 0 {
-            return None;
+            return (None, None);
         }
 
         let new_entry = CacheEntry::new(value, ttl_ms);
         let new_bytes = key.len() + new_entry.value.len();
         let mut old_value = None;
+        let mut evictions: Option<Vec<Eviction>> = None;
 
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
             match list {
                 ArcList::T1 | ArcList::T2 => {
-                    let old_bytes = self.node_bytes(idx);
-                    old_value = self.nodes[idx].value.replace(new_entry).map(|e| e.value);
-                    self.bytes_used = self.bytes_used + new_bytes - old_bytes;
-                    self.detach(idx);
-                    self.attach_to_head(idx, ArcList::T2);
+                    let expired = self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired());
+                    if expired {
+                        let (ev_key, entry) = self.remove_completely(idx);
+                        self.map.remove(&ev_key);
+                        let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
+                        evictions.get_or_insert_with(Vec::new).push(Eviction {
+                            key: ev_key,
+                            value,
+                            reason: "expired".to_string(),
+                        });
+                    } else {
+                        let old_bytes = self.node_bytes(idx);
+                        old_value = self.nodes[idx].value.replace(new_entry.clone()).map(|e| e.value);
+                        self.bytes_used = self.bytes_used + new_bytes - old_bytes;
+                        self.detach(idx);
+                        self.attach_to_head(idx, ArcList::T2);
+                    }
                 }
                 ArcList::B1 => {
                     let b1_len = if self.b1.len == 0 { 1 } else { self.b1.len };
                     let delta = std::cmp::max(1, self.b2.len / b1_len);
                     self.p = std::cmp::min(self.p + delta, self.capacity);
 
-                    self.replace(false);
+                    if let Some(ev) = self.replace(false) {
+                        evictions.get_or_insert_with(Vec::new).push(ev);
+                    }
 
                     self.detach(idx);
-                    self.nodes[idx].value = Some(new_entry);
+                    self.nodes[idx].value = Some(new_entry.clone());
                     self.bytes_used += new_bytes;
                     self.attach_to_head(idx, ArcList::T2);
                 }
@@ -279,39 +334,55 @@ impl CacheImpl for ArcCache {
                     let delta = std::cmp::max(1, self.b1.len / b2_len);
                     self.p = self.p.saturating_sub(delta);
 
-                    self.replace(true);
+                    if let Some(ev) = self.replace(true) {
+                        evictions.get_or_insert_with(Vec::new).push(ev);
+                    }
 
                     self.detach(idx);
-                    self.nodes[idx].value = Some(new_entry);
+                    self.nodes[idx].value = Some(new_entry.clone());
                     self.bytes_used += new_bytes;
                     self.attach_to_head(idx, ArcList::T2);
                 }
             }
-        } else {
+        }
+
+        if !self.map.contains_key(key) {
             let l1_len = self.t1.len + self.b1.len;
             let l2_len = self.t2.len + self.b2.len;
 
             if l1_len == self.capacity {
                 if self.t1.len < self.capacity {
                     if let Some(b1_tail) = self.b1.tail {
-                        let evicted_key = self.remove_completely(b1_tail);
-                        self.map.remove(&evicted_key);
+                        let ev_key = self.remove_completely(b1_tail).0;
+                        self.map.remove(&ev_key);
                     }
-                    self.replace(false);
+                    if let Some(ev) = self.replace(false) {
+                        evictions.get_or_insert_with(Vec::new).push(ev);
+                    }
                 } else {
                     if let Some(t1_tail) = self.t1.tail {
-                        let evicted_key = self.remove_completely(t1_tail);
-                        self.map.remove(&evicted_key);
+                        let (ev_key, entry) = self.remove_completely(t1_tail);
+                        self.map.remove(&ev_key);
+                        if let Some(e) = entry {
+                            self.evictions += 1;
+                            evictions.get_or_insert_with(Vec::new).push(Eviction {
+                                key: ev_key,
+                                value: e.value,
+                                reason: "evicted".to_string(),
+                            });
+                        }
                     }
                 }
             } else if l1_len < self.capacity && l1_len + l2_len >= self.capacity {
                 if l1_len + l2_len == 2 * self.capacity {
                     if let Some(b2_tail) = self.b2.tail {
-                        let evicted_key = self.remove_completely(b2_tail);
-                        self.map.remove(&evicted_key);
+                        let ev_key = self.remove_completely(b2_tail).0;
+                        self.map.remove(&ev_key);
                     }
                 }
-                self.replace(false);
+                if let Some(ev) = self.replace(false) {
+                    evictions.get_or_insert_with(Vec::new).push(ev);
+                }
             }
 
             let idx = if let Some(free_idx) = self.free_nodes.pop() {
@@ -337,35 +408,43 @@ impl CacheImpl for ArcCache {
 
         if let Some(max) = self.max_bytes {
             while self.bytes_used > max && (self.t1.len > 0 || self.t2.len > 0) {
-                self.replace(false);
+                if let Some(ev) = self.replace(false) {
+                    evictions.get_or_insert_with(Vec::new).push(ev);
+                }
             }
         }
 
-        old_value
+        (old_value, evictions)
     }
 
-    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
             match list {
                 ArcList::T1 | ArcList::T2 => {
                     let expired = self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired());
                     if expired {
-                        self.remove_completely(idx);
+                        let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(key);
-                        false
+                        let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
+                        (false, Some(Eviction {
+                            key: ev_key,
+                            value,
+                            reason: "expired".to_string(),
+                        }))
                     } else {
                         let val = self.nodes[idx].value.as_ref().unwrap().value.clone();
                         self.nodes[idx].value = Some(CacheEntry::new(val, ttl_ms));
                         self.detach(idx);
                         self.attach_to_head(idx, ArcList::T2);
-                        true
+                        (true, None)
                     }
                 }
-                _ => false
+                _ => (false, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
@@ -390,6 +469,8 @@ impl CacheImpl for ArcCache {
         self.p = 0;
         self.hits = 0;
         self.misses = 0;
+        self.evictions = 0;
+        self.expirations = 0;
         self.bytes_used = 0;
     }
 
@@ -400,6 +481,8 @@ impl CacheImpl for ArcCache {
             capacity: self.capacity,
             size: self.t1.len + self.t2.len,
             bytes_used: self.bytes_used,
+            evictions: self.evictions,
+            expirations: self.expirations,
         }
     }
 
@@ -440,14 +523,14 @@ mod tests {
         cache.set("c", vec![3], None);
         
         // Hits to move to T2
-        assert_eq!(cache.get("a"), Some(vec![1]));
-        assert_eq!(cache.get("b"), Some(vec![2]));
+        assert_eq!(cache.get("a").0, Some(vec![1]));
+        assert_eq!(cache.get("b").0, Some(vec![2]));
         
         // Set new key, should evict c (which was in T1 and never hit)
         cache.set("d", vec![4], None);
-        assert_eq!(cache.get("c"), None);
-        assert_eq!(cache.get("a"), Some(vec![1]));
-        assert_eq!(cache.get("b"), Some(vec![2]));
-        assert_eq!(cache.get("d"), Some(vec![4]));
+        assert_eq!(cache.get("c").0, None);
+        assert_eq!(cache.get("a").0, Some(vec![1]));
+        assert_eq!(cache.get("b").0, Some(vec![2]));
+        assert_eq!(cache.get("d").0, Some(vec![4]));
     }
 }

@@ -7,8 +7,18 @@ pub struct CacheStats {
     pub capacity: usize,
     pub size: usize,
     pub bytes_used: usize,
+    pub evictions: u64,
+    pub expirations: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct Eviction {
+    pub key: String,
+    pub value: Vec<u8>,
+    pub reason: String, // "evicted", "expired"
+}
+
+#[derive(Debug, Clone)]
 pub struct CacheEntry {
     pub value: Vec<u8>,
     pub expires_at: Option<Instant>,
@@ -30,11 +40,11 @@ impl CacheEntry {
 }
 
 pub trait CacheImpl: Send + Sync {
-    fn get(&mut self, key: &str) -> Option<Vec<u8>>;
-    fn peek(&mut self, key: &str) -> Option<Vec<u8>>;
-    fn has(&mut self, key: &str) -> bool;
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>>;
-    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool;
+    fn get(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>);
+    fn peek(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>);
+    fn has(&mut self, key: &str) -> (bool, Option<Eviction>);
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>);
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>);
     fn delete(&mut self, key: &str) -> bool;
     fn clear(&mut self);
     fn stats(&self) -> CacheStats;

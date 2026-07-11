@@ -38,6 +38,9 @@ const DEFAULT_CONFIG = {
   ttl: {
     defaultMs: undefined,
     mode: 'absolute', // absolute or sliding
+  },
+  monitoring: {
+    minIntervalMs: 500,
   }
 };
 
@@ -81,6 +84,13 @@ function normalizeConfig(config) {
       capacity: config.l1Capacity,
       ...config.l1
     };
+  }
+
+  // Monitoring normalization
+  if (config.monitoring !== undefined) {
+    normalized.monitoring = typeof config.monitoring === 'object'
+      ? config.monitoring
+      : { minIntervalMs: config.monitoring };
   }
 
   return normalized;
@@ -132,11 +142,31 @@ class Cache {
     }
 
     // 2. Check Native L2 Cache
-    const nativeVal = unwrapValue(this._native.get(key));
-    if (nativeVal !== undefined) {
-      this._l1Set(key, nativeVal);
+    const nativeVal = this._native.get(key);
+    
+    // Check if expired
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      this._l1.delete(key);
+      if (this._config.hooks) {
+        if (this._config.hooks.onExpire) {
+          this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
+        }
+        if (this._config.hooks.onMiss) {
+          this._config.hooks.onMiss(key);
+        }
+      }
+      return undefined;
     }
-    return nativeVal;
+
+    const unwrapped = unwrapValue(nativeVal);
+    if (unwrapped !== undefined) {
+      this._l1Set(key, unwrapped);
+    } else {
+      if (this._config.hooks && this._config.hooks.onMiss) {
+        this._config.hooks.onMiss(key);
+      }
+    }
+    return unwrapped;
   }
 
   peek(key) {
@@ -147,7 +177,15 @@ class Cache {
         return l1Val;
       }
     }
-    return unwrapValue(this._native.peek(key));
+    const nativeVal = this._native.peek(key);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      this._l1.delete(key);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
+      }
+      return undefined;
+    }
+    return unwrapValue(nativeVal);
   }
 
   has(key) {
@@ -155,7 +193,15 @@ class Cache {
     if (this._l1Capacity > 0 && this._l1.has(key)) {
       return true;
     }
-    return this._native.has(key);
+    const nativeVal = this._native.has(key);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      this._l1.delete(key);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
+      }
+      return false;
+    }
+    return !!nativeVal;
   }
 
   set(key, value, ttlMsOrOptions) {
@@ -190,13 +236,33 @@ class Cache {
       }
     }
 
-    this._native.set(key, wrapped, ttlMs, forceCompression);
+    const evictions = this._native.set(key, wrapped, ttlMs, forceCompression);
+    if (Array.isArray(evictions)) {
+      for (const ev of evictions) {
+        if (ev.reason === 'expired') {
+          if (this._config.hooks && this._config.hooks.onExpire) {
+            this._config.hooks.onExpire(ev.key, unwrapValue(ev.value));
+          }
+        } else {
+          if (this._config.hooks && this._config.hooks.onEvict) {
+            this._config.hooks.onEvict(ev.key, unwrapValue(ev.value), ev.reason);
+          }
+        }
+      }
+    }
   }
 
   touch(key, ttlMs) {
     validateKey(key);
     this._l1.delete(key); // Invalidate L1 on TTL update
-    return this._native.touch(key, ttlMs);
+    const nativeVal = this._native.touch(key, ttlMs);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
+      }
+      return false;
+    }
+    return !!nativeVal;
   }
 
   delete(key) {
@@ -212,13 +278,118 @@ class Cache {
 
   stats() {
     const rawStats = this._native.stats();
+
+    // Shards analysis
+    const shardSizes = rawStats.shards.map(s => s.size);
+    const shardCount = shardSizes.length;
+    const sizeMean = shardSizes.reduce((a, b) => a + b, 0) / shardCount;
+    const sizeStdDev = Math.sqrt(
+      shardSizes.reduce((a, b) => a + Math.pow(b - sizeMean, 2), 0) / shardCount
+    );
+
     return {
       hits: rawStats.hits,
       misses: rawStats.misses,
       capacity: rawStats.capacity,
       size: rawStats.size,
       bytesUsed: rawStats.bytesUsed,
+      sets: rawStats.sets,
+      deletes: rawStats.deletes,
+      evictions: rawStats.evictions,
+      expirations: rawStats.expirations,
+      hitRate: rawStats.hitRate,
+      uptimeMs: rawStats.uptimeMs,
+      shards: {
+        count: shardCount,
+        details: rawStats.shards.map(s => ({
+          size: s.size,
+          bytesUsed: s.bytes_used || s.bytesUsed,
+        })),
+        sizeStdDev: Math.round(sizeStdDev * 100) / 100,
+      },
+      memory: {
+        payloadBytes: rawStats.bytesUsed,
+        processRss: process.memoryUsage().rss,
+      },
+      l1: {
+        size: this._l1.size,
+        capacity: this._l1Capacity,
+      },
     };
+  }
+
+  monitor(callback, intervalMs) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('monitor() requires a callback function');
+    }
+
+    const HARD_FLOOR = 16;
+    const configuredMin = (this._config.monitoring && this._config.monitoring.minIntervalMs) !== undefined
+      ? this._config.monitoring.minIntervalMs
+      : 500;
+    const effectiveMin = Math.max(HARD_FLOOR, configuredMin);
+    const interval = intervalMs !== undefined ? intervalMs : effectiveMin;
+
+    if (interval < HARD_FLOOR) {
+      throw new RangeError(
+        `intervalMs ${interval} is below the absolute minimum of ${HARD_FLOOR}ms`
+      );
+    }
+    if (interval < effectiveMin) {
+      throw new RangeError(
+        `intervalMs ${interval} is below configured minIntervalMs ${effectiveMin}`
+      );
+    }
+
+    let prev = this._native.statsCounters();
+    let prevTime = Date.now();
+
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const curr = this._native.statsCounters();
+      const elapsed = (now - prevTime) / 1000;
+
+      const delta = {
+        hits: curr.hits - prev.hits,
+        misses: curr.misses - prev.misses,
+        sets: curr.sets - prev.sets,
+        deletes: curr.deletes - prev.deletes,
+        evictions: curr.evictions - prev.evictions,
+        expirations: curr.expirations - prev.expirations,
+      };
+
+      const totalOps = delta.hits + delta.misses + delta.sets + delta.deletes;
+
+      const snapshot = {
+        totals: {
+          hits: curr.hits,
+          misses: curr.misses,
+          sets: curr.sets,
+          deletes: curr.deletes,
+          evictions: curr.evictions,
+          expirations: curr.expirations,
+        },
+        delta,
+        rates: {
+          opsPerSec: elapsed > 0 ? Math.round(totalOps / elapsed) : 0,
+          hitsPerSec: elapsed > 0 ? Math.round(delta.hits / elapsed) : 0,
+          missesPerSec: elapsed > 0 ? Math.round(delta.misses / elapsed) : 0,
+          setsPerSec: elapsed > 0 ? Math.round(delta.sets / elapsed) : 0,
+          hitRate: (delta.hits + delta.misses) > 0
+            ? delta.hits / (delta.hits + delta.misses)
+            : null,
+        },
+        intervalMs: now - prevTime,
+        timestamp: now,
+      };
+
+      prev = curr;
+      prevTime = now;
+
+      callback(snapshot);
+    }, interval);
+
+    return () => clearInterval(timer);
   }
 
   keys() {
@@ -259,11 +430,29 @@ class Cache {
     if (missing.length > 0) {
       const nativeValues = this._native.mget(missing);
       for (let i = 0; i < missing.length; i++) {
-        const val = unwrapValue(nativeValues[i]);
-        if (val !== undefined) {
-          const key = missing[i];
-          result[key] = val;
-          this._l1Set(key, val);
+        const key = missing[i];
+        const valRaw = nativeValues[i];
+        
+        if (valRaw && typeof valRaw === 'object' && valRaw.__expired) {
+          this._l1.delete(key);
+          if (this._config.hooks) {
+            if (this._config.hooks.onExpire) {
+              this._config.hooks.onExpire(key, unwrapValue(valRaw.value));
+            }
+            if (this._config.hooks.onMiss) {
+              this._config.hooks.onMiss(key);
+            }
+          }
+        } else {
+          const val = unwrapValue(valRaw);
+          if (val !== undefined) {
+            result[key] = val;
+            this._l1Set(key, val);
+          } else {
+            if (this._config.hooks && this._config.hooks.onMiss) {
+              this._config.hooks.onMiss(key);
+            }
+          }
         }
       }
     }
@@ -282,7 +471,20 @@ class Cache {
       this._l1.delete(k); // Invalidate L1
       wrapped[k] = wrapValue(val);
     }
-    this._native.mset(wrapped, ttlMs);
+    const evictions = this._native.mset(wrapped, ttlMs);
+    if (Array.isArray(evictions)) {
+      for (const ev of evictions) {
+        if (ev.reason === 'expired') {
+          if (this._config.hooks && this._config.hooks.onExpire) {
+            this._config.hooks.onExpire(ev.key, unwrapValue(ev.value));
+          }
+        } else {
+          if (this._config.hooks && this._config.hooks.onEvict) {
+            this._config.hooks.onEvict(ev.key, unwrapValue(ev.value), ev.reason);
+          }
+        }
+      }
+    }
   }
   mdelete(keys) {
     if (!Array.isArray(keys)) {
@@ -345,6 +547,7 @@ class CacheManager {
   constructor(globalConfig = {}) {
     this._native = new NativeCacheManager();
     this._globalConfig = mergeConfigs(DEFAULT_CONFIG, normalizeConfig(globalConfig));
+    this._caches = new Map();
   }
 
   createCache(name, config = {}) {
@@ -357,24 +560,34 @@ class CacheManager {
       compression: merged.compression.enabled,
     };
     const nativeCache = this._native.createCache(name, rawConfig);
-    return new Cache(nativeCache, merged);
+    const cache = new Cache(nativeCache, merged);
+    this._caches.set(name, cache);
+    return cache;
   }
 
   getCache(name) {
+    if (this._caches.has(name)) {
+      return this._caches.get(name);
+    }
     const nativeCache = this._native.getCache(name);
     if (!nativeCache) return null;
-    return new Cache(nativeCache, this._globalConfig);
+    const cache = new Cache(nativeCache, this._globalConfig);
+    this._caches.set(name, cache);
+    return cache;
   }
 
   deleteCache(name) {
+    this._caches.delete(name);
     return this._native.deleteCache(name);
   }
 
   clear() {
+    this._caches.clear();
     this._native.clear();
   }
 
   dispose() {
+    this._caches.clear();
     this._native.clear();
   }
 }
