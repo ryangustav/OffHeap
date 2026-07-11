@@ -691,4 +691,107 @@ test('Cache - Worker Threads Sharing', async () => {
   manager.dispose();
 });
 
+test('Lifecycle Hooks - onMiss', () => {
+  const misses = [];
+  const manager = new CacheManager();
+  const cache = manager.createCache('hook-miss', {
+    policy: 'lru',
+    capacity: 10,
+    hooks: {
+      onMiss: (key) => {
+        misses.push(key);
+      }
+    }
+  });
+
+  cache.get('miss1');
+  cache.mget(['miss2', 'miss3']);
+
+  assert.deepStrictEqual(misses, ['miss1', 'miss2', 'miss3']);
+  manager.deleteCache('hook-miss');
+});
+
+test('Lifecycle Hooks - onEvict (replaced)', () => {
+  const evictions = [];
+  const manager = new CacheManager();
+  const cache = manager.createCache('hook-evict-replaced', {
+    policy: 'lru',
+    capacity: 10,
+    hooks: {
+      onEvict: (key, value, reason) => {
+        evictions.push({ key, value, reason });
+      }
+    }
+  });
+
+  cache.set('key1', 'val1');
+  cache.set('key1', 'val2'); // overwritten/replaced
+
+  assert.deepStrictEqual(evictions, [
+    { key: 'key1', value: 'val1', reason: 'replaced' }
+  ]);
+  manager.deleteCache('hook-evict-replaced');
+});
+
+test('Lifecycle Hooks - onEvict (capacity eviction)', () => {
+  const evictions = [];
+  const manager = new CacheManager();
+  const cache = manager.createCache('hook-evict-capacity', {
+    policy: 'lru',
+    capacity: 2,
+    shards: 1,
+    l1Capacity: 0,
+    hooks: {
+      onEvict: (key, value, reason) => {
+        evictions.push({ key, value, reason });
+      }
+    }
+  });
+
+  cache.set('key1', 'val1');
+  cache.set('key2', 'val2');
+  cache.set('key3', 'val3'); // Should evict key1
+
+  assert.strictEqual(evictions.length, 1);
+  assert.strictEqual(evictions[0].key, 'key1');
+  assert.strictEqual(evictions[0].value, 'val1');
+  assert.strictEqual(evictions[0].reason, 'evicted');
+  manager.deleteCache('hook-evict-capacity');
+});
+
+test('Lifecycle Hooks - onExpire (lazy expiration)', async () => {
+  const expirations = [];
+  const manager = new CacheManager();
+  const cache = manager.createCache('hook-expire', {
+    policy: 'lru',
+    capacity: 10,
+    hooks: {
+      onExpire: (key, value) => {
+        expirations.push({ key, value });
+      }
+    }
+  });
+
+  cache.set('temp1', 'exp1', 10); // TTL 10ms
+  cache.set('temp2', 'exp2', 10); // TTL 10ms
+  
+  // Wait for TTL to expire
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Access temp1 to trigger lazy expiration
+  const val1 = cache.get('temp1');
+  assert.strictEqual(val1, undefined);
+  assert.deepStrictEqual(expirations, [{ key: 'temp1', value: 'exp1' }]);
+
+  // Access temp2 using has/touch/peek/mget
+  const has2 = cache.has('temp2');
+  assert.strictEqual(has2, false);
+  assert.deepStrictEqual(expirations, [
+    { key: 'temp1', value: 'exp1' },
+    { key: 'temp2', value: 'exp2' }
+  ]);
+
+  manager.deleteCache('hook-expire');
+});
+
 

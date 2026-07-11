@@ -20,12 +20,19 @@ export interface TtlConfig {
   mode?: 'absolute' | 'sliding';
 }
 
+export interface CacheHooks {
+  onEvict?: (key: string, value: any, reason: 'evicted' | 'replaced') => void;
+  onExpire?: (key: string, value: any) => void;
+  onMiss?: (key: string) => void;
+}
+
 export interface CacheConfig {
   shards?: number;
   eviction?: EvictionConfig;
   compression?: CompressionConfig;
   l1?: L1Config;
   ttl?: TtlConfig;
+  hooks?: CacheHooks;
   
   // Legacy options (Backward Compatibility)
   policy?: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';

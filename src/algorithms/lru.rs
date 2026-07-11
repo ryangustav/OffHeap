@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::{CacheImpl, CacheEntry, CacheStats};
+use super::{CacheImpl, CacheEntry, CacheStats, Eviction};
 
 struct LruNode {
     key: String,
@@ -92,77 +92,138 @@ impl LruCache {
 }
 
 impl CacheImpl for LruCache {
-    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn get(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
                 self.misses += 1;
-                None
+                (None, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 self.move_to_head(node_idx);
                 self.hits += 1;
-                Some(self.nodes[node_idx].entry.value.clone())
+                (Some(self.nodes[node_idx].entry.value.clone()), None)
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn peek(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn peek(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
                 self.misses += 1;
-                None
+                (None, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 self.hits += 1;
-                Some(self.nodes[node_idx].entry.value.clone())
+                (Some(self.nodes[node_idx].entry.value.clone()), None)
             }
         } else {
             self.misses += 1;
-            None
+            (None, None)
         }
     }
 
-    fn has(&mut self, key: &str) -> bool {
+    fn has(&mut self, key: &str) -> (bool, Option<Eviction>) {
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
-                false
+                (false, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
-                true
+                (true, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> Option<Vec<u8>> {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Vec<Eviction>) {
         let new_bytes = key.len() + value.len();
         let mut old_value = None;
+        let mut evictions = Vec::new();
 
         if let Some(&node_idx) = self.map.get(key) {
-            let old_entry = std::mem::replace(
-                &mut self.nodes[node_idx].entry,
-                CacheEntry::new(value, ttl_ms),
-            );
-            let old_bytes = key.len() + old_entry.value.len();
-            self.bytes_used = self.bytes_used + new_bytes - old_bytes;
-            self.move_to_head(node_idx);
-            old_value = Some(old_entry.value);
+            if self.nodes[node_idx].entry.is_expired() {
+                let (evicted_key, evicted_entry) = self.remove_node(node_idx);
+                self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
+                self.map.remove(key);
+                evictions.push(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                });
+                
+                if self.map.len() >= self.capacity && self.capacity > 0 {
+                    if let Some(t_idx) = self.tail {
+                        let (ev_key, ev_entry) = self.remove_node(t_idx);
+                        self.bytes_used -= ev_key.len() + ev_entry.value.len();
+                        self.map.remove(&ev_key);
+                        evictions.push(Eviction {
+                            key: ev_key,
+                            value: ev_entry.value,
+                            reason: "evicted".to_string(),
+                        });
+                    }
+                }
+
+                let new_idx = if let Some(idx) = self.free_nodes.pop() {
+                    self.nodes[idx].key = key.to_string();
+                    self.nodes[idx].entry = CacheEntry::new(value, ttl_ms);
+                    idx
+                } else {
+                    let idx = self.nodes.len();
+                    self.nodes.push(LruNode {
+                        key: key.to_string(),
+                        entry: CacheEntry::new(value, ttl_ms),
+                        prev: None,
+                        next: None,
+                    });
+                    idx
+                };
+
+                self.bytes_used += new_bytes;
+                self.attach_to_head(new_idx);
+                self.map.insert(key.to_string(), new_idx);
+            } else {
+                let old_entry = std::mem::replace(
+                    &mut self.nodes[node_idx].entry,
+                    CacheEntry::new(value, ttl_ms),
+                );
+                let old_bytes = key.len() + old_entry.value.len();
+                self.bytes_used = self.bytes_used + new_bytes - old_bytes;
+                self.move_to_head(node_idx);
+                old_value = Some(old_entry.value);
+            }
         } else {
             if self.map.len() >= self.capacity && self.capacity > 0 {
                 if let Some(t_idx) = self.tail {
-                    let (evicted_key, evicted_entry) = self.remove_node(t_idx);
-                    self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
-                    self.map.remove(&evicted_key);
+                    let (ev_key, ev_entry) = self.remove_node(t_idx);
+                    self.bytes_used -= ev_key.len() + ev_entry.value.len();
+                    self.map.remove(&ev_key);
+                    evictions.push(Eviction {
+                        key: ev_key,
+                        value: ev_entry.value,
+                        reason: "evicted".to_string(),
+                    });
                 }
             }
 
@@ -192,32 +253,41 @@ impl CacheImpl for LruCache {
                     let (evicted_key, evicted_entry) = self.remove_node(t_idx);
                     self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                     self.map.remove(&evicted_key);
+                    evictions.push(Eviction {
+                        key: evicted_key,
+                        value: evicted_entry.value,
+                        reason: "evicted".to_string(),
+                    });
                 } else {
                     break;
                 }
             }
         }
 
-        old_value
+        (old_value, evictions)
     }
 
-    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> bool {
+    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
-                false
+                (false, Some(Eviction {
+                    key: evicted_key,
+                    value: evicted_entry.value,
+                    reason: "expired".to_string(),
+                }))
             } else {
                 self.nodes[node_idx].entry = CacheEntry::new(
                     self.nodes[node_idx].entry.value.clone(),
                     ttl_ms,
                 );
                 self.move_to_head(node_idx);
-                true
+                (true, None)
             }
         } else {
-            false
+            (false, None)
         }
     }
 
@@ -276,19 +346,19 @@ mod tests {
         let mut cache = LruCache::new(2);
         cache.set("a", vec![1], None);
         cache.set("b", vec![2], None);
-        assert_eq!(cache.get("a"), Some(vec![1]));
+        assert_eq!(cache.get("a").0, Some(vec![1]));
         cache.set("c", vec![3], None); // should evict "b"
-        assert_eq!(cache.get("b"), None);
-        assert_eq!(cache.get("a"), Some(vec![1]));
-        assert_eq!(cache.get("c"), Some(vec![3]));
+        assert_eq!(cache.get("b").0, None);
+        assert_eq!(cache.get("a").0, Some(vec![1]));
+        assert_eq!(cache.get("c").0, Some(vec![3]));
     }
 
     #[test]
     fn test_lru_expiry() {
         let mut cache = LruCache::new(2);
         cache.set("a", vec![1], Some(10)); // 10ms
-        assert_eq!(cache.get("a"), Some(vec![1]));
+        assert_eq!(cache.get("a").0, Some(vec![1]));
         std::thread::sleep(std::time::Duration::from_millis(15));
-        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("a").0, None);
     }
 }

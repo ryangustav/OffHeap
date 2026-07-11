@@ -238,8 +238,16 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        let res = if let Some(bytes) = cache.get(&key) {
-            self.deserialize_value(env, bytes)
+        let (bytes, eviction) = cache.get(&key);
+        let res = if let Some(b) = bytes {
+            self.deserialize_value(env, b)
+        } else if let Some(ev) = eviction {
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
         } else {
             Ok(env.get_undefined()?.into_unknown())
         };
@@ -254,8 +262,16 @@ impl Cache {
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
         
-        let res = if let Some(bytes) = cache.peek(&key) {
-            self.deserialize_value(env, bytes)
+        let (bytes, eviction) = cache.peek(&key);
+        let res = if let Some(b) = bytes {
+            self.deserialize_value(env, b)
+        } else if let Some(ev) = eviction {
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
         } else {
             Ok(env.get_undefined()?.into_unknown())
         };
@@ -264,18 +280,30 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn has(&self, key: String) -> Result<bool> {
+    pub fn has(&self, env: Env, key: String) -> Result<JsUnknown> {
         validate_key(&key)?;
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        let res = cache.has(&key);
+        let (has_key, eviction) = cache.has(&key);
         *lock = Some(cache);
-        Ok(res)
+        
+        if has_key {
+            Ok(env.get_boolean(true)?.into_unknown())
+        } else if let Some(ev) = eviction {
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            Ok(env.get_boolean(false)?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<()> {
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<Vec<JsUnknown>> {
         validate_key(&key)?;
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
@@ -283,21 +311,51 @@ impl Cache {
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        cache.set(&key, bytes, ttl);
+        let (old_val, evs) = cache.set(&key, bytes, ttl);
         *lock = Some(cache);
-        Ok(())
+        
+        let mut all_evictions = Vec::new();
+        if let Some(old) = old_val {
+            let mut ev_obj = env.create_object()?;
+            ev_obj.set_named_property("key", env.create_string(&key)?)?;
+            let val_js = self.deserialize_value(env, old)?;
+            ev_obj.set_named_property("value", val_js)?;
+            ev_obj.set_named_property("reason", env.create_string("replaced")?)?;
+            all_evictions.push(ev_obj.into_unknown());
+        }
+        for ev in evs {
+            let mut ev_obj = env.create_object()?;
+            ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            ev_obj.set_named_property("value", val_js)?;
+            ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
+            all_evictions.push(ev_obj.into_unknown());
+        }
+        Ok(all_evictions)
     }
 
     #[napi(catch_unwind)]
-    pub fn touch(&self, key: String, ttl_ms: Option<f64>) -> Result<bool> {
+    pub fn touch(&self, env: Env, key: String, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         validate_key(&key)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
         let shard_lock = self.get_shard(&key)?;
         let mut lock = shard_lock.lock();
         let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-        let res = cache.touch(&key, ttl);
+        let (res, eviction) = cache.touch(&key, ttl);
         *lock = Some(cache);
-        Ok(res)
+        
+        if res {
+            Ok(env.get_boolean(true)?.into_unknown())
+        } else if let Some(ev) = eviction {
+            let mut obj = env.create_object()?;
+            obj.set_named_property("__expired", env.get_boolean(true)?)?;
+            obj.set_named_property("key", env.create_string(&ev.key)?)?;
+            let val_js = self.deserialize_value(env, ev.value)?;
+            obj.set_named_property("value", val_js)?;
+            Ok(obj.into_unknown())
+        } else {
+            Ok(env.get_boolean(false)?.into_unknown())
+        }
     }
 
     #[napi(catch_unwind)]
@@ -380,7 +438,8 @@ impl Cache {
         let mut run = || -> Result<JsUnknown> {
             let mut current_val = 0i64;
             
-            if let Some(bytes) = cache.get(&key) {
+            let (bytes_opt, _eviction) = cache.get(&key);
+            if let Some(bytes) = bytes_opt {
                 if !bytes.is_empty() {
                     let tag = bytes[0];
                     let payload = &bytes[1..];
@@ -412,7 +471,7 @@ impl Cache {
             new_bytes.extend_from_slice(&new_val.to_ne_bytes());
             
             let ttl = ttl_ms.map(|ms| ms as u64);
-            cache.set(&key, new_bytes, ttl);
+            let _ = cache.set(&key, new_bytes, ttl);
             
             let js_num = env.create_double(new_val as f64)?;
             Ok(js_num.into_unknown())
@@ -437,8 +496,16 @@ impl Cache {
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
             
-            let val_res = if let Some(bytes) = cache.get(&key) {
-                self.deserialize_value(env, bytes)
+            let (bytes, eviction) = cache.get(&key);
+            let val_res = if let Some(b) = bytes {
+                self.deserialize_value(env, b)
+            } else if let Some(ev) = eviction {
+                let mut obj = env.create_object()?;
+                obj.set_named_property("__expired", env.get_boolean(true)?)?;
+                obj.set_named_property("key", env.create_string(&ev.key)?)?;
+                let val_js = self.deserialize_value(env, ev.value)?;
+                obj.set_named_property("value", val_js)?;
+                Ok(obj.into_unknown())
             } else {
                 Ok(env.get_undefined()?.into_unknown())
             };
@@ -449,10 +516,11 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<()> {
+    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<Vec<JsUnknown>> {
         let keys_array = entries.get_property_names()?;
         let len = keys_array.get_array_length()?;
         let ttl = ttl_ms.map(|ms| ms as u64);
+        let mut all_evictions = Vec::new();
         
         for i in 0..len {
             let key_unknown: JsUnknown = keys_array.get_element(i)?;
@@ -466,10 +534,27 @@ impl Cache {
             let shard_lock = self.get_shard(&key)?;
             let mut lock = shard_lock.lock();
             let mut cache = lock.take().ok_or_else(|| napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned"))?;
-            cache.set(&key, bytes, ttl);
+            let (old_val, evs) = cache.set(&key, bytes, ttl);
             *lock = Some(cache);
+            
+            if let Some(old) = old_val {
+                let mut ev_obj = env.create_object()?;
+                ev_obj.set_named_property("key", env.create_string(&key)?)?;
+                let val_js = self.deserialize_value(env, old)?;
+                ev_obj.set_named_property("value", val_js)?;
+                ev_obj.set_named_property("reason", env.create_string("replaced")?)?;
+                all_evictions.push(ev_obj.into_unknown());
+            }
+            for ev in evs {
+                let mut ev_obj = env.create_object()?;
+                ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
+                let val_js = self.deserialize_value(env, ev.value)?;
+                ev_obj.set_named_property("value", val_js)?;
+                ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
+                all_evictions.push(ev_obj.into_unknown());
+            }
         }
-        Ok(())
+        Ok(all_evictions)
     }
 
     #[napi(catch_unwind)]

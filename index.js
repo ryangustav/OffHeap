@@ -132,11 +132,30 @@ class Cache {
     }
 
     // 2. Check Native L2 Cache
-    const nativeVal = unwrapValue(this._native.get(key));
-    if (nativeVal !== undefined) {
-      this._l1Set(key, nativeVal);
+    const nativeVal = this._native.get(key);
+    
+    // Check if expired
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      const value = unwrapValue(nativeVal.value);
+      this._l1.delete(key);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, value);
+      }
+      if (this._config.hooks && this._config.hooks.onMiss) {
+        this._config.hooks.onMiss(key);
+      }
+      return undefined;
     }
-    return nativeVal;
+
+    const unwrapped = unwrapValue(nativeVal);
+    if (unwrapped !== undefined) {
+      this._l1Set(key, unwrapped);
+    } else {
+      if (this._config.hooks && this._config.hooks.onMiss) {
+        this._config.hooks.onMiss(key);
+      }
+    }
+    return unwrapped;
   }
 
   peek(key) {
@@ -147,7 +166,16 @@ class Cache {
         return l1Val;
       }
     }
-    return unwrapValue(this._native.peek(key));
+    const nativeVal = this._native.peek(key);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      const value = unwrapValue(nativeVal.value);
+      this._l1.delete(key);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, value);
+      }
+      return undefined;
+    }
+    return unwrapValue(nativeVal);
   }
 
   has(key) {
@@ -155,7 +183,16 @@ class Cache {
     if (this._l1Capacity > 0 && this._l1.has(key)) {
       return true;
     }
-    return this._native.has(key);
+    const nativeVal = this._native.has(key);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      const value = unwrapValue(nativeVal.value);
+      this._l1.delete(key);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, value);
+      }
+      return false;
+    }
+    return !!nativeVal;
   }
 
   set(key, value, ttlMsOrOptions) {
@@ -190,13 +227,35 @@ class Cache {
       }
     }
 
-    this._native.set(key, wrapped, ttlMs, forceCompression);
+    const evictions = this._native.set(key, wrapped, ttlMs, forceCompression);
+    if (Array.isArray(evictions)) {
+      for (const ev of evictions) {
+        const val = unwrapValue(ev.value);
+        if (ev.reason === 'expired') {
+          if (this._config.hooks && this._config.hooks.onExpire) {
+            this._config.hooks.onExpire(ev.key, val);
+          }
+        } else {
+          if (this._config.hooks && this._config.hooks.onEvict) {
+            this._config.hooks.onEvict(ev.key, val, ev.reason);
+          }
+        }
+      }
+    }
   }
 
   touch(key, ttlMs) {
     validateKey(key);
     this._l1.delete(key); // Invalidate L1 on TTL update
-    return this._native.touch(key, ttlMs);
+    const nativeVal = this._native.touch(key, ttlMs);
+    if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
+      const value = unwrapValue(nativeVal.value);
+      if (this._config.hooks && this._config.hooks.onExpire) {
+        this._config.hooks.onExpire(key, value);
+      }
+      return false;
+    }
+    return !!nativeVal;
   }
 
   delete(key) {
@@ -259,11 +318,28 @@ class Cache {
     if (missing.length > 0) {
       const nativeValues = this._native.mget(missing);
       for (let i = 0; i < missing.length; i++) {
-        const val = unwrapValue(nativeValues[i]);
-        if (val !== undefined) {
-          const key = missing[i];
-          result[key] = val;
-          this._l1Set(key, val);
+        const key = missing[i];
+        const valRaw = nativeValues[i];
+        
+        if (valRaw && typeof valRaw === 'object' && valRaw.__expired) {
+          const value = unwrapValue(valRaw.value);
+          this._l1.delete(key);
+          if (this._config.hooks && this._config.hooks.onExpire) {
+            this._config.hooks.onExpire(key, value);
+          }
+          if (this._config.hooks && this._config.hooks.onMiss) {
+            this._config.hooks.onMiss(key);
+          }
+        } else {
+          const val = unwrapValue(valRaw);
+          if (val !== undefined) {
+            result[key] = val;
+            this._l1Set(key, val);
+          } else {
+            if (this._config.hooks && this._config.hooks.onMiss) {
+              this._config.hooks.onMiss(key);
+            }
+          }
         }
       }
     }
@@ -282,7 +358,21 @@ class Cache {
       this._l1.delete(k); // Invalidate L1
       wrapped[k] = wrapValue(val);
     }
-    this._native.mset(wrapped, ttlMs);
+    const evictions = this._native.mset(wrapped, ttlMs);
+    if (Array.isArray(evictions)) {
+      for (const ev of evictions) {
+        const val = unwrapValue(ev.value);
+        if (ev.reason === 'expired') {
+          if (this._config.hooks && this._config.hooks.onExpire) {
+            this._config.hooks.onExpire(ev.key, val);
+          }
+        } else {
+          if (this._config.hooks && this._config.hooks.onEvict) {
+            this._config.hooks.onEvict(ev.key, val, ev.reason);
+          }
+        }
+      }
+    }
   }
   mdelete(keys) {
     if (!Array.isArray(keys)) {
