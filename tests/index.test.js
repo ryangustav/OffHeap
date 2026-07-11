@@ -14,7 +14,11 @@ test('CacheManager - isolated caches', () => {
   assert.strictEqual(cache1.get('key'), 'value-1');
   assert.strictEqual(cache2.get('key'), 'value-2');
   
-  assert.deepStrictEqual(manager.getCache('lru-1').stats(), cache1.stats());
+  const statsLeft = manager.getCache('lru-1').stats();
+  const statsRight = cache1.stats();
+  statsLeft.memory.processRss = 0;
+  statsRight.memory.processRss = 0;
+  assert.deepStrictEqual(statsLeft, statsRight);
   
   manager.deleteCache('lru-1');
   assert.strictEqual(manager.getCache('lru-1'), null);
@@ -765,6 +769,7 @@ test('Lifecycle Hooks - onExpire (lazy expiration)', async () => {
   const cache = manager.createCache('hook-expire', {
     policy: 'lru',
     capacity: 10,
+    shards: 1,
     hooks: {
       onExpire: (key, value) => {
         expirations.push({ key, value });
@@ -793,5 +798,191 @@ test('Lifecycle Hooks - onExpire (lazy expiration)', async () => {
 
   manager.deleteCache('hook-expire');
 });
+
+test('Observability - Enriched Stats & Lock-free Atomics', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('obs-stats', {
+    policy: 'lru',
+    capacity: 10,
+    shards: 2,
+    l1Capacity: 0
+  });
+
+  // Check initial stats
+  let st = cache.stats();
+  assert.strictEqual(st.sets, 0);
+  assert.strictEqual(st.hits, 0);
+  assert.strictEqual(st.misses, 0);
+  assert.strictEqual(st.deletes, 0);
+  assert.strictEqual(st.evictions, 0);
+  assert.strictEqual(st.expirations, 0);
+  assert.strictEqual(st.hitRate, 0);
+  assert.ok(st.uptimeMs >= 0);
+  assert.strictEqual(st.l1.size, 0);
+
+  // Perform operations
+  cache.set('a', 1);
+  cache.set('b', 2);
+  cache.set('c', 3); // 3 sets
+  
+  cache.get('a'); // 1 hit
+  cache.get('b'); // 2 hits
+  cache.get('nonexistent'); // 1 miss
+
+  cache.delete('c'); // 1 delete
+
+  st = cache.stats();
+  assert.strictEqual(st.sets, 3);
+  assert.strictEqual(st.hits, 2);
+  assert.strictEqual(st.misses, 1);
+  assert.strictEqual(st.deletes, 1);
+  assert.strictEqual(st.hitRate, 2 / 3);
+
+  manager.deleteCache('obs-stats');
+});
+
+test('Observability - Monitor Floors & Rejections', () => {
+  const manager = new CacheManager({
+    monitoring: { minIntervalMs: 200 }
+  });
+  const cache = manager.createCache('obs-floors');
+
+  // Callback dummy
+  const cb = () => {};
+
+  // 1. Absolute hard floor rejection (< 16ms)
+  assert.throws(() => {
+    cache.monitor(cb, 10);
+  }, /is below the absolute minimum of 16ms/);
+
+  // 2. Configured soft floor rejection (requested 100ms < configured 200ms)
+  assert.throws(() => {
+    cache.monitor(cb, 100);
+  }, /is below configured minIntervalMs 200/);
+
+  // 3. Invalid callback rejection
+  assert.throws(() => {
+    cache.monitor('not a function');
+  }, TypeError);
+
+  // 4. Default / valid interval runs
+  const stop = cache.monitor(cb, 300);
+  assert.strictEqual(typeof stop, 'function');
+  stop();
+
+  manager.deleteCache('obs-floors');
+});
+
+test('Observability - Monitoring Config Inheritance', () => {
+  // Manager config overrides default 500ms -> 300ms
+  const manager = new CacheManager({
+    monitoring: { minIntervalMs: 300 }
+  });
+
+  // Inherits 300ms
+  const cache1 = manager.createCache('obs-inherit1');
+  assert.throws(() => {
+    cache1.monitor(() => {}, 200);
+  }, /is below configured minIntervalMs 300/);
+
+  // Overrides namespace to 100ms
+  const cache2 = manager.createCache('obs-inherit2', {
+    monitoring: { minIntervalMs: 100 }
+  });
+  const stop2 = cache2.monitor(() => {}, 150); // Works!
+  stop2();
+
+  assert.throws(() => {
+    cache2.monitor(() => {}, 50); // Fails (< 100ms)
+  }, /is below configured minIntervalMs 100/);
+
+  manager.deleteCache('obs-inherit1');
+  manager.deleteCache('obs-inherit2');
+});
+
+test('Observability - Monitor Realtime Delta & Rates', async () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('obs-realtime', {
+    monitoring: { minIntervalMs: 50 }, // Allow low interval for testing
+    l1Capacity: 0
+  });
+
+  const ticks = [];
+  const stop = cache.monitor((snapshot) => {
+    ticks.push(snapshot);
+  }, 50);
+
+  // Perform some rapid ops to trigger rates
+  cache.set('x', 10);
+  cache.get('x');
+  cache.get('y'); // Miss
+
+  // Wait for at least one tick
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  stop(); // Stop poller
+
+  assert.ok(ticks.length >= 1, 'Should have received at least one monitoring snapshot');
+  const snap = ticks[0];
+  
+  // Verify totals
+  assert.ok(snap.totals.sets >= 1);
+  assert.ok(snap.totals.hits >= 1);
+  assert.ok(snap.totals.misses >= 1);
+
+  // Verify delta
+  assert.ok(snap.delta.sets >= 1);
+  assert.ok(snap.delta.hits >= 1);
+  
+  // Verify rates
+  assert.ok(snap.rates.opsPerSec >= 0);
+  assert.strictEqual(snap.rates.hitRate, 0.5); // 1 hit, 1 miss
+
+  // Wait another interval to verify callback stopped
+  const initialTickCount = ticks.length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.strictEqual(ticks.length, initialTickCount, 'Should have stopped poller after disposer');
+
+  manager.deleteCache('obs-realtime');
+});
+
+test('Observability - Shard Imbalance & Memory RSS', () => {
+  const manager = new CacheManager();
+  const cache = manager.createCache('obs-shards-memory', {
+    policy: 'lru',
+    capacity: 16,
+    shards: 4,
+    l1Capacity: 0
+  });
+
+  // Populate cache to ensure some data is in shards
+  cache.set('key1', 'val1');
+  cache.set('key2', 'val2');
+  cache.set('key3', 'val3');
+  cache.set('key4', 'val4');
+
+  const st = cache.stats();
+
+  // Shards validation
+  assert.strictEqual(st.shards.count, 4);
+  assert.strictEqual(st.shards.details.length, 4);
+  assert.strictEqual(typeof st.shards.sizeStdDev, 'number');
+  assert.ok(!isNaN(st.shards.sizeStdDev));
+
+  // Memory validation
+  assert.strictEqual(st.memory.payloadBytes, st.bytesUsed);
+  assert.strictEqual(typeof st.memory.processRss, 'number');
+  assert.ok(st.memory.processRss > 0);
+
+  // Assert sum of size of shards is equal to total size
+  const sumSize = st.shards.details.reduce((a, b) => a + b.size, 0);
+  assert.strictEqual(sumSize, st.size);
+
+  // Assert sum of bytes used of shards is equal to total bytes used
+  const sumBytes = st.shards.details.reduce((a, b) => a + b.bytesUsed, 0);
+  assert.strictEqual(sumBytes, st.bytesUsed);
+
+  manager.deleteCache('obs-shards-memory');
+});
+
 
 

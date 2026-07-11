@@ -49,6 +49,8 @@ pub struct ArcCache {
     p: usize, // Target size for T1
     hits: u64,
     misses: u64,
+    evictions: u64,
+    expirations: u64,
 }
 
 impl ArcCache {
@@ -71,6 +73,8 @@ impl ArcCache {
             p: 0,
             hits: 0,
             misses: 0,
+            evictions: 0,
+            expirations: 0,
         }
     }
 
@@ -153,6 +157,7 @@ impl ArcCache {
                 let entry = self.nodes[t1_tail].value.take(); // Evict value from memory
                 self.attach_to_head(t1_tail, ArcList::B1);
                 if let Some(e) = entry {
+                    self.evictions += 1;
                     return Some(Eviction {
                         key: self.nodes[t1_tail].key.clone(),
                         value: e.value,
@@ -168,6 +173,7 @@ impl ArcCache {
                 let entry = self.nodes[t2_tail].value.take(); // Evict value from memory
                 self.attach_to_head(t2_tail, ArcList::B2);
                 if let Some(e) = entry {
+                    self.evictions += 1;
                     return Some(Eviction {
                         key: self.nodes[t2_tail].key.clone(),
                         value: e.value,
@@ -191,6 +197,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(&ev_key);
                         self.misses += 1;
+                        self.expirations += 1;
                         let value = entry.map(|e| e.value).unwrap_or_default();
                         (None, Some(Eviction {
                             key: ev_key,
@@ -225,6 +232,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(&ev_key);
                         self.misses += 1;
+                        self.expirations += 1;
                         let value = entry.map(|e| e.value).unwrap_or_default();
                         (None, Some(Eviction {
                             key: ev_key,
@@ -257,6 +265,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(&ev_key);
                         let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
                         (false, Some(Eviction {
                             key: ev_key,
                             value,
@@ -292,6 +301,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(&ev_key);
                         let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
                         evictions.get_or_insert_with(Vec::new).push(Eviction {
                             key: ev_key,
                             value,
@@ -354,6 +364,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(t1_tail);
                         self.map.remove(&ev_key);
                         if let Some(e) = entry {
+                            self.evictions += 1;
                             evictions.get_or_insert_with(Vec::new).push(Eviction {
                                 key: ev_key,
                                 value: e.value,
@@ -416,6 +427,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(key);
                         let value = entry.map(|e| e.value).unwrap_or_default();
+                        self.expirations += 1;
                         (false, Some(Eviction {
                             key: ev_key,
                             value,
@@ -457,6 +469,8 @@ impl CacheImpl for ArcCache {
         self.p = 0;
         self.hits = 0;
         self.misses = 0;
+        self.evictions = 0;
+        self.expirations = 0;
         self.bytes_used = 0;
     }
 
@@ -467,6 +481,8 @@ impl CacheImpl for ArcCache {
             capacity: self.capacity,
             size: self.t1.len + self.t2.len,
             bytes_used: self.bytes_used,
+            evictions: self.evictions,
+            expirations: self.expirations,
         }
     }
 
