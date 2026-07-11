@@ -156,17 +156,17 @@ impl CacheImpl for LruCache {
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Vec<Eviction>) {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
         let new_bytes = key.len() + value.len();
         let mut old_value = None;
-        let mut evictions = Vec::new();
+        let mut evictions: Option<Vec<Eviction>> = None;
 
         if let Some(&node_idx) = self.map.get(key) {
             if self.nodes[node_idx].entry.is_expired() {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
-                evictions.push(Eviction {
+                evictions.get_or_insert_with(Vec::new).push(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
                     reason: "expired".to_string(),
@@ -177,7 +177,7 @@ impl CacheImpl for LruCache {
                         let (ev_key, ev_entry) = self.remove_node(t_idx);
                         self.bytes_used -= ev_key.len() + ev_entry.value.len();
                         self.map.remove(&ev_key);
-                        evictions.push(Eviction {
+                        evictions.get_or_insert_with(Vec::new).push(Eviction {
                             key: ev_key,
                             value: ev_entry.value,
                             reason: "evicted".to_string(),
@@ -219,7 +219,7 @@ impl CacheImpl for LruCache {
                     let (ev_key, ev_entry) = self.remove_node(t_idx);
                     self.bytes_used -= ev_key.len() + ev_entry.value.len();
                     self.map.remove(&ev_key);
-                    evictions.push(Eviction {
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: ev_key,
                         value: ev_entry.value,
                         reason: "evicted".to_string(),
@@ -253,7 +253,7 @@ impl CacheImpl for LruCache {
                     let (evicted_key, evicted_entry) = self.remove_node(t_idx);
                     self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                     self.map.remove(&evicted_key);
-                    evictions.push(Eviction {
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: evicted_key,
                         value: evicted_entry.value,
                         reason: "evicted".to_string(),

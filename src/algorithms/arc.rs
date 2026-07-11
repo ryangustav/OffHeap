@@ -273,15 +273,15 @@ impl CacheImpl for ArcCache {
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Vec<Eviction>) {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
         if self.capacity == 0 {
-            return (None, Vec::new());
+            return (None, None);
         }
 
         let new_entry = CacheEntry::new(value, ttl_ms);
         let new_bytes = key.len() + new_entry.value.len();
         let mut old_value = None;
-        let mut evictions = Vec::new();
+        let mut evictions: Option<Vec<Eviction>> = None;
 
         if let Some(&idx) = self.map.get(key) {
             let list = self.nodes[idx].list;
@@ -292,7 +292,7 @@ impl CacheImpl for ArcCache {
                         let (ev_key, entry) = self.remove_completely(idx);
                         self.map.remove(&ev_key);
                         let value = entry.map(|e| e.value).unwrap_or_default();
-                        evictions.push(Eviction {
+                        evictions.get_or_insert_with(Vec::new).push(Eviction {
                             key: ev_key,
                             value,
                             reason: "expired".to_string(),
@@ -311,7 +311,7 @@ impl CacheImpl for ArcCache {
                     self.p = std::cmp::min(self.p + delta, self.capacity);
 
                     if let Some(ev) = self.replace(false) {
-                        evictions.push(ev);
+                        evictions.get_or_insert_with(Vec::new).push(ev);
                     }
 
                     self.detach(idx);
@@ -325,7 +325,7 @@ impl CacheImpl for ArcCache {
                     self.p = self.p.saturating_sub(delta);
 
                     if let Some(ev) = self.replace(true) {
-                        evictions.push(ev);
+                        evictions.get_or_insert_with(Vec::new).push(ev);
                     }
 
                     self.detach(idx);
@@ -347,14 +347,14 @@ impl CacheImpl for ArcCache {
                         self.map.remove(&ev_key);
                     }
                     if let Some(ev) = self.replace(false) {
-                        evictions.push(ev);
+                        evictions.get_or_insert_with(Vec::new).push(ev);
                     }
                 } else {
                     if let Some(t1_tail) = self.t1.tail {
                         let (ev_key, entry) = self.remove_completely(t1_tail);
                         self.map.remove(&ev_key);
                         if let Some(e) = entry {
-                            evictions.push(Eviction {
+                            evictions.get_or_insert_with(Vec::new).push(Eviction {
                                 key: ev_key,
                                 value: e.value,
                                 reason: "evicted".to_string(),
@@ -370,7 +370,7 @@ impl CacheImpl for ArcCache {
                     }
                 }
                 if let Some(ev) = self.replace(false) {
-                    evictions.push(ev);
+                    evictions.get_or_insert_with(Vec::new).push(ev);
                 }
             }
 
@@ -398,7 +398,7 @@ impl CacheImpl for ArcCache {
         if let Some(max) = self.max_bytes {
             while self.bytes_used > max && (self.t1.len > 0 || self.t2.len > 0) {
                 if let Some(ev) = self.replace(false) {
-                    evictions.push(ev);
+                    evictions.get_or_insert_with(Vec::new).push(ev);
                 }
             }
         }

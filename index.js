@@ -136,13 +136,14 @@ class Cache {
     
     // Check if expired
     if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
-      const value = unwrapValue(nativeVal.value);
       this._l1.delete(key);
-      if (this._config.hooks && this._config.hooks.onExpire) {
-        this._config.hooks.onExpire(key, value);
-      }
-      if (this._config.hooks && this._config.hooks.onMiss) {
-        this._config.hooks.onMiss(key);
+      if (this._config.hooks) {
+        if (this._config.hooks.onExpire) {
+          this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
+        }
+        if (this._config.hooks.onMiss) {
+          this._config.hooks.onMiss(key);
+        }
       }
       return undefined;
     }
@@ -168,10 +169,9 @@ class Cache {
     }
     const nativeVal = this._native.peek(key);
     if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
-      const value = unwrapValue(nativeVal.value);
       this._l1.delete(key);
       if (this._config.hooks && this._config.hooks.onExpire) {
-        this._config.hooks.onExpire(key, value);
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
       }
       return undefined;
     }
@@ -185,10 +185,9 @@ class Cache {
     }
     const nativeVal = this._native.has(key);
     if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
-      const value = unwrapValue(nativeVal.value);
       this._l1.delete(key);
       if (this._config.hooks && this._config.hooks.onExpire) {
-        this._config.hooks.onExpire(key, value);
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
       }
       return false;
     }
@@ -230,14 +229,13 @@ class Cache {
     const evictions = this._native.set(key, wrapped, ttlMs, forceCompression);
     if (Array.isArray(evictions)) {
       for (const ev of evictions) {
-        const val = unwrapValue(ev.value);
         if (ev.reason === 'expired') {
           if (this._config.hooks && this._config.hooks.onExpire) {
-            this._config.hooks.onExpire(ev.key, val);
+            this._config.hooks.onExpire(ev.key, unwrapValue(ev.value));
           }
         } else {
           if (this._config.hooks && this._config.hooks.onEvict) {
-            this._config.hooks.onEvict(ev.key, val, ev.reason);
+            this._config.hooks.onEvict(ev.key, unwrapValue(ev.value), ev.reason);
           }
         }
       }
@@ -249,9 +247,8 @@ class Cache {
     this._l1.delete(key); // Invalidate L1 on TTL update
     const nativeVal = this._native.touch(key, ttlMs);
     if (nativeVal && typeof nativeVal === 'object' && nativeVal.__expired) {
-      const value = unwrapValue(nativeVal.value);
       if (this._config.hooks && this._config.hooks.onExpire) {
-        this._config.hooks.onExpire(key, value);
+        this._config.hooks.onExpire(key, unwrapValue(nativeVal.value));
       }
       return false;
     }
@@ -322,13 +319,14 @@ class Cache {
         const valRaw = nativeValues[i];
         
         if (valRaw && typeof valRaw === 'object' && valRaw.__expired) {
-          const value = unwrapValue(valRaw.value);
           this._l1.delete(key);
-          if (this._config.hooks && this._config.hooks.onExpire) {
-            this._config.hooks.onExpire(key, value);
-          }
-          if (this._config.hooks && this._config.hooks.onMiss) {
-            this._config.hooks.onMiss(key);
+          if (this._config.hooks) {
+            if (this._config.hooks.onExpire) {
+              this._config.hooks.onExpire(key, unwrapValue(valRaw.value));
+            }
+            if (this._config.hooks.onMiss) {
+              this._config.hooks.onMiss(key);
+            }
           }
         } else {
           const val = unwrapValue(valRaw);
@@ -361,14 +359,13 @@ class Cache {
     const evictions = this._native.mset(wrapped, ttlMs);
     if (Array.isArray(evictions)) {
       for (const ev of evictions) {
-        const val = unwrapValue(ev.value);
         if (ev.reason === 'expired') {
           if (this._config.hooks && this._config.hooks.onExpire) {
-            this._config.hooks.onExpire(ev.key, val);
+            this._config.hooks.onExpire(ev.key, unwrapValue(ev.value));
           }
         } else {
           if (this._config.hooks && this._config.hooks.onEvict) {
-            this._config.hooks.onEvict(ev.key, val, ev.reason);
+            this._config.hooks.onEvict(ev.key, unwrapValue(ev.value), ev.reason);
           }
         }
       }

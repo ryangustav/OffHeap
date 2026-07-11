@@ -337,13 +337,13 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Vec<Eviction>) {
+    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
         self.sketch.increment(key);
 
         let new_entry = CacheEntry::new(value, ttl_ms);
         let new_bytes = key.len() + new_entry.value.len();
         let mut old_value = None;
-        let mut evictions = Vec::new();
+        let mut evictions: Option<Vec<Eviction>> = None;
 
         if let Some(&idx) = self.map.get(key) {
             let old_bytes = self.node_bytes(idx);
@@ -374,7 +374,7 @@ impl CacheImpl for TinyLfuCache {
             }
         } else {
             if self.capacity == 0 {
-                return (None, Vec::new());
+                return (None, None);
             }
 
             let new_idx = if let Some(free_idx) = self.free_nodes.pop() {
@@ -421,7 +421,7 @@ impl CacheImpl for TinyLfuCache {
                                     let (evicted_key, evicted_entry) = self.remove_completely(victim_idx, false);
                                     self.map.remove(&evicted_key);
                                     self.attach_to_head(candidate_idx, TinyLfuList::Probation);
-                                    evictions.push(Eviction {
+                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                                         key: evicted_key,
                                         value: evicted_entry.value,
                                         reason: "evicted".to_string(),
@@ -429,7 +429,7 @@ impl CacheImpl for TinyLfuCache {
                                 } else {
                                     let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
                                     self.map.remove(&evicted_key);
-                                    evictions.push(Eviction {
+                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                                         key: evicted_key,
                                         value: evicted_entry.value,
                                         reason: "evicted".to_string(),
@@ -442,7 +442,7 @@ impl CacheImpl for TinyLfuCache {
                     } else {
                         let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
                         self.map.remove(&evicted_key);
-                        evictions.push(Eviction {
+                        evictions.get_or_insert_with(Vec::new).push(Eviction {
                             key: evicted_key,
                             value: evicted_entry.value,
                             reason: "evicted".to_string(),
@@ -457,7 +457,7 @@ impl CacheImpl for TinyLfuCache {
                 if let Some(prob_tail) = self.probation.tail {
                     let (evicted_key, evicted_entry) = self.remove_completely(prob_tail, false);
                     self.map.remove(&evicted_key);
-                    evictions.push(Eviction {
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: evicted_key,
                         value: evicted_entry.value,
                         reason: "evicted".to_string(),
@@ -465,7 +465,7 @@ impl CacheImpl for TinyLfuCache {
                 } else if let Some(win_tail) = self.window.tail {
                     let (evicted_key, evicted_entry) = self.remove_completely(win_tail, false);
                     self.map.remove(&evicted_key);
-                    evictions.push(Eviction {
+                    evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: evicted_key,
                         value: evicted_entry.value,
                         reason: "evicted".to_string(),

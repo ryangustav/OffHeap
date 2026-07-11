@@ -303,7 +303,7 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<Vec<JsUnknown>> {
+    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<JsUnknown> {
         validate_key(&key)?;
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_ms.map(|ms| ms as u64);
@@ -314,6 +314,10 @@ impl Cache {
         let (old_val, evs) = cache.set(&key, bytes, ttl);
         *lock = Some(cache);
         
+        if old_val.is_none() && evs.is_none() {
+            return Ok(env.get_undefined()?.into_unknown());
+        }
+
         let mut all_evictions = Vec::new();
         if let Some(old) = old_val {
             let mut ev_obj = env.create_object()?;
@@ -323,15 +327,22 @@ impl Cache {
             ev_obj.set_named_property("reason", env.create_string("replaced")?)?;
             all_evictions.push(ev_obj.into_unknown());
         }
-        for ev in evs {
-            let mut ev_obj = env.create_object()?;
-            ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
-            let val_js = self.deserialize_value(env, ev.value)?;
-            ev_obj.set_named_property("value", val_js)?;
-            ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
-            all_evictions.push(ev_obj.into_unknown());
+        if let Some(evs_list) = evs {
+            for ev in evs_list {
+                let mut ev_obj = env.create_object()?;
+                ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
+                let val_js = self.deserialize_value(env, ev.value)?;
+                ev_obj.set_named_property("value", val_js)?;
+                ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
+                all_evictions.push(ev_obj.into_unknown());
+            }
         }
-        Ok(all_evictions)
+        
+        let mut js_arr = env.create_array_with_length(all_evictions.len())?;
+        for (i, val) in all_evictions.into_iter().enumerate() {
+            js_arr.set_element(i as u32, val)?;
+        }
+        Ok(js_arr.into_unknown())
     }
 
     #[napi(catch_unwind)]
@@ -516,11 +527,11 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<Vec<JsUnknown>> {
+    pub fn mset(&self, env: Env, entries: JsObject, ttl_ms: Option<f64>) -> Result<JsUnknown> {
         let keys_array = entries.get_property_names()?;
         let len = keys_array.get_array_length()?;
         let ttl = ttl_ms.map(|ms| ms as u64);
-        let mut all_evictions = Vec::new();
+        let mut collected_evictions = Vec::new();
         
         for i in 0..len {
             let key_unknown: JsUnknown = keys_array.get_element(i)?;
@@ -538,23 +549,30 @@ impl Cache {
             *lock = Some(cache);
             
             if let Some(old) = old_val {
-                let mut ev_obj = env.create_object()?;
-                ev_obj.set_named_property("key", env.create_string(&key)?)?;
-                let val_js = self.deserialize_value(env, old)?;
-                ev_obj.set_named_property("value", val_js)?;
-                ev_obj.set_named_property("reason", env.create_string("replaced")?)?;
-                all_evictions.push(ev_obj.into_unknown());
+                collected_evictions.push((key, old, "replaced".to_string()));
             }
-            for ev in evs {
-                let mut ev_obj = env.create_object()?;
-                ev_obj.set_named_property("key", env.create_string(&ev.key)?)?;
-                let val_js = self.deserialize_value(env, ev.value)?;
-                ev_obj.set_named_property("value", val_js)?;
-                ev_obj.set_named_property("reason", env.create_string(&ev.reason)?)?;
-                all_evictions.push(ev_obj.into_unknown());
+            if let Some(evs_list) = evs {
+                for ev in evs_list {
+                    collected_evictions.push((ev.key, ev.value, ev.reason));
+                }
             }
         }
-        Ok(all_evictions)
+        
+        if collected_evictions.is_empty() {
+            return Ok(env.get_undefined()?.into_unknown());
+        }
+
+        let mut js_arr = env.create_array_with_length(collected_evictions.len())?;
+        for (i, (key, value, reason)) in collected_evictions.into_iter().enumerate() {
+            let mut ev_obj = env.create_object()?;
+            ev_obj.set_named_property("key", env.create_string(&key)?)?;
+            let val_js = self.deserialize_value(env, value)?;
+            ev_obj.set_named_property("value", val_js)?;
+            ev_obj.set_named_property("reason", env.create_string(&reason)?)?;
+            js_arr.set_element(i as u32, ev_obj.into_unknown())?;
+        }
+        
+        Ok(js_arr.into_unknown())
     }
 
     #[napi(catch_unwind)]
