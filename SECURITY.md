@@ -1,89 +1,89 @@
-# Política de Segurança e Auditorias (SECURITY.md)
+# Security Policy and Auditing (SECURITY.md)
 
-Este documento define a política de segurança do projeto **OffHeap** e detalha as auditorias de segurança contínuas implementadas para garantir a integridade e robustez da biblioteca.
+This document defines the security policy for the **OffHeap** project and details the continuous security audits implemented to ensure the library's integrity and robustness.
 
 ---
 
-## 🛡️ Versões Suportadas
+## 🛡️ Supported Versions
 
-Atualmente, apenas as seguintes versões recebem atualizações de segurança:
+Currently, only the following versions receive security updates:
 
-| Versão | Suportada |
+| Version | Supported |
 | :--- | :---: |
-| **0.3.x** | ✅ Sim (Ativa) |
-| **< 0.3.0** | ❌ Não |
+| **0.3.x** | ✅ Yes (Active) |
+| **< 0.3.0** | ❌ No |
 
-Recomendamos sempre manter a biblioteca atualizada na última versão minor/patch disponível para garantir que correções de segurança e otimizações estejam ativas em seu ambiente de produção.
+We always recommend keeping the library updated to the latest minor/patch version available to ensure security fixes and optimizations are active in your production environment.
 
 > [!TIP]
-> **Nota de Instalação:** Devido a problemas na publicação automatizada de pacotes nativos, as versões entre `0.3.0` e `0.3.10` podem falhar ao instalar em determinadas plataformas (como Windows e Linux musl). Recomendamos fortemente a utilização da versão `0.3.11` ou superior para ambiente funcional.
+> **Installation Note:** Due to issues with automated publishing of native packages, versions between `0.3.0` and `0.3.10` may fail to install on certain platforms (such as Windows and Linux musl). We strongly recommend using version `0.3.11` or higher for a fully functional environment.
 
 ---
 
-## 🔍 Auditorias de Segurança Automatizadas (CI)
+## 🔍 Automated Security Audits (CI)
 
-Para garantir que nenhuma dependência vulnerável seja introduzida na biblioteca, executamos auditorias de segurança automáticas em cada *Push* e *Pull Request* no pipeline de Integração Contínua (CI), localizado em [.github/workflows/CI.yml](file:///f:/ryang/Development/principal/L1-Cache/.github/workflows/CI.yml).
+To ensure that no vulnerable dependency is introduced into the library, we execute automated security audits on every *Push* and *Pull Request* in the Continuous Integration (CI) pipeline, located in [.github/workflows/CI.yml](file:///f:/ryang/Development/principal/L1-Cache/.github/workflows/CI.yml).
 
-As auditorias abrangem as duas principais camadas do projeto (Rust e Node.js):
+The audits cover the two main layers of the project (Rust and Node.js):
 
 ### 1. Cargo Audit (Rust Crates)
-*   **O que faz:** Varre o arquivo `Cargo.lock` contra a base de dados de vulnerabilidades conhecidas em Rust ([RustSec Advisory Database](https://rustsec.org)).
-*   **Implementação no CI:**
+*   **What it does:** Scans the `Cargo.lock` file against the database of known vulnerabilities in Rust ([RustSec Advisory Database](https://rustsec.org)).
+*   **CI Implementation:**
     ```yaml
     - name: Run Cargo Audit
       uses: actions-rust-lang/audit@v1
     ```
 
 ### 2. NPM Audit (Node.js Dependencies)
-*   **O que faz:** Analisa o arquivo `package-lock.json` contra vulnerabilidades conhecidas no ecossistema npm.
-*   **Implementação no CI:**
+*   **What it does:** Analyzes the `package-lock.json` file against known vulnerabilities in the npm ecosystem.
+*   **CI Implementation:**
     ```yaml
     - name: Run NPM Audit
       run: npm audit --omit=dev
     ```
 
 > [!NOTE]  
-> Ambas as auditorias rodam antes de qualquer compilação ou publicação. Se qualquer vulnerabilidade for encontrada em dependências de produção, o build falhará automaticamente e impedirá a publicação de novas versões do pacote no NPM.
+> Both audits run before any compilation or publication. If any vulnerability is found in production dependencies, the build will automatically fail and prevent publishing new versions of the package to NPM.
 
 ---
 
-## 🧠 Considerações de Segurança e Memória
+## 🧠 Security and Memory Considerations
 
-Como o **OffHeap** gerencia dados diretamente na memória nativa (fora do heap do V8/Node.js), existem pontos importantes que desenvolvedores devem ter em mente ao usar a biblioteca:
+Since **OffHeap** manages data directly in native memory (outside the V8/Node.js heap), there are important details that developers should keep in mind when using the library:
 
-### 1. Segurança de Memória com Rust
-O núcleo do OffHeap é escrito em **Rust**. Nas partes do código que não usam `unsafe`, isso elimina por construção problemas como *buffer overflows*, *dangling pointers* e *data races*. 
+### 1. Memory Safety with Rust
+The core of OffHeap is written in **Rust**. In parts of the code that do not use `unsafe`, this by design eliminates issues such as *buffer overflows*, *dangling pointers*, and *data races*. 
 
-Como o OffHeap cruza a fronteira FFI com o Node.js, partes do código exigem o uso de `unsafe` para gerenciar ponteiros brutos na ponte nativa. Essas seções passam por revisão manual criteriosa e testes dedicados (como validação de *panic safety* e contabilidade de memória sob concorrência) em vez de dependerem apenas das garantias estáticas do compilador.
+Since OffHeap crosses the FFI boundary with Node.js, parts of the code require using `unsafe` to manage raw pointers on the native bridge. These sections undergo careful manual review and dedicated testing (such as validating *panic safety* and memory accounting under concurrency) instead of relying solely on the compiler's static guarantees.
 
-O uso do alocador `mimalloc` garante que a gerência física de memória seja robusta, rápida e protegida contra fragmentação.
+Using the `mimalloc` allocator ensures that physical memory management is robust, fast, and protected against fragmentation.
 
-### 2. Descarte de Dados e Zeroização (Memory Zeroization)
-*   Quando uma entrada do cache expira (TTL), é removida ou despejada por políticas de despejo (LRU, ARC, W-TinyLFU), seu espaço de memória é devolvido ao alocador nativo `mimalloc`.
-*   Por padrão, o **OffHeap não sobrescreve os bytes com zeros (zeroization) antes de liberar a memória**.
-*   **Recomendação:** Se você estiver armazenando dados extremamente sensíveis (ex: chaves privadas, senhas brutas), criptografe-os antes de inseri-los no cache ou certifique-se de realizar a limpeza (zeroização) a nível de aplicação.
+### 2. Data Disposal and Zeroization (Memory Zeroization)
+*   When a cache entry expires (TTL), is removed, or is evicted by eviction policies (LRU, ARC, W-TinyLFU), its memory space is returned to the native `mimalloc` allocator.
+*   By default, **OffHeap does not overwrite bytes with zeros (zeroization) before freeing memory**.
+*   **Recommendation:** If you are storing extremely sensitive data (e.g., private keys, raw passwords), encrypt them before inserting them into the cache, or ensure that you perform cleaning (zeroization) at the application level.
 
-### 3. Isolamento de Namespace e Risco de Colisão
-*   Usar `CacheManager.createCache(name)` gera uma instância de cache física e logicamente isolada. As chaves não colidem entre namespaces de cache diferentes.
-*   **Atenção:** Se sua aplicação decide unificar o cache e usar prefixos manuais para separar inquilinos (*tenants*), ex: `tenant_id + "::" + key`, certifique-se de higienizar/sanitizar as entradas para evitar ataques de colisão de chaves (*key collision attacks*).
+### 3. Namespace Isolation and Collision Risk
+*   Using `CacheManager.createCache(name)` generates a physically and logically isolated cache instance. Keys do not collide between different cache namespaces.
+*   **Warning:** If your application decides to unify the cache and use manual prefixes to separate tenants, e.g., `tenant_id + "::" + key`, make sure to sanitize the inputs to prevent key collision attacks.
 
-### 4. Mitigações e Defesas Ativas contra Abuso e DoS
-O OffHeap possui defesas explícitas integradas à arquitetura do código para conter vetores de ataque comuns em sistemas de cache:
-*   **Proteção contra Integer Overflow**: Habilitamos explicitamente `overflow-checks = true` no perfil de release (`Cargo.toml`). Isso garante que operações aritméticas na contabilidade de tamanho e bytes (`bytes_used`) entrem em pânico controlado em caso de estouro em vez de falharem silenciosamente (o que poderia abrir brechas para corrupção de memória).
-*   **Validação de Limite de Chaves**: Aplicamos uma validação rígida de que nenhuma chave de cache pode exceder o limite de segurança de **8192 bytes**. Essa checagem é feita de forma redundante: primeiro na camada JavaScript/TypeScript (para falhar rápido) e depois na camada Rust nativa.
-*   **Resistência a Hash Flooding**: Para o roteamento de shards e a indexação interna do cache, o OffHeap utiliza a estrutura padrão `HashMap` do Rust, que emprega o algoritmo `SipHash-1-3` com sementes criptograficamente seguras e geradas aleatoriamente por processo (`RandomState`). Isso previne ataques de colisão proposital de hash criados para degradar a performance da tabela de hash para $O(N)$.
-*   **Teto de Descompressão LZ4 Dinâmico**: Para evitar ataques do tipo *decompression bomb* (onde um payload compactado pequeno se expande em gigabytes na descompressão), o OffHeap valida o tamanho uncompressed do bloco LZ4 antes da alocação do vetor. Esse limite é dinâmico: ele é restrito a no máximo 32 MB ou a **10% do limite máximo de bytes da cache** (`maxBytes` * 0.1), o que for menor — com um piso mínimo de **1 KB** para evitar tetos degenerados em configurações de capacidade reduzida. Isso garante que a descompressão nunca cause exaustão súbita de memória (OOM).
+### 4. Active Mitigations and Defenses against Abuse and DoS
+OffHeap has explicit defenses integrated into the code architecture to contain common attack vectors in caching systems:
+*   **Integer Overflow Protection**: We explicitly enable `overflow-checks = true` in the release profile (`Cargo.toml`). This ensures that arithmetic operations on size and byte accounting (`bytes_used`) trigger a controlled panic in case of overflow instead of failing silently (which could open doors for memory corruption).
+*   **Key Limit Validation**: We apply a strict validation that no cache key can exceed the safety limit of **8192 bytes**. This check is performed redundantly: first at the JavaScript/TypeScript layer (to fail fast) and then at the native Rust layer.
+*   **Hash Flooding Resistance**: For shard routing and internal cache indexing, OffHeap uses Rust's standard `HashMap` structure, which employs the `SipHash-1-3` algorithm with cryptographically secure seeds randomly generated per process (`RandomState`). This prevents intentional hash collision attacks designed to degrade hash table performance to $O(N)$.
+*   **Dynamic LZ4 Decompression Ceiling**: To prevent decompression bomb attacks (where a small compressed payload expands into gigabytes upon decompression), OffHeap validates the uncompressed size of the LZ4 block before vector allocation. This limit is dynamic: it is restricted to a maximum of 32 MB or **10% of the cache's maximum byte limit** (`maxBytes` * 0.1), whichever is smaller — with a minimum floor of **1 KB** to avoid degenerate limits in low-capacity configurations. This ensures decompression never causes sudden Out Of Memory (OOM) exhaustion.
 
 ---
 
-## ✉️ Como Reportar uma Vulnerabilidade
+## ✉️ How to Report a Vulnerability
 
-Se você descobrir alguma vulnerabilidade de segurança no OffHeap, **por favor não abra uma Issue pública**. Em vez disso, siga o procedimento abaixo:
+If you discover any security vulnerability in OffHeap, **please do not open a public issue**. Instead, follow the procedure below:
 
-1. Envie um e-mail descrevendo detalhadamente a vulnerabilidade para o mantenedor: **ryangustav (através do GitHub ou e-mail de contato do projeto)** ou crie um **Draft Security Advisory** diretamente no repositório do GitHub.
-2. Forneça o máximo de informações possível, incluindo:
-   * Passos detalhados para reproduzir o problema.
-   * Prova de Conceito (PoC) ou trecho de código que demonstre a vulnerabilidade.
-   * Possível impacto no sistema.
+1. Send an email describing the vulnerability in detail to the maintainer: **ryangustav (via GitHub or project contact email)** or create a **Draft Security Advisory** directly in the GitHub repository.
+2. Provide as much information as possible, including:
+   * Detailed steps to reproduce the issue.
+   * Proof of Concept (PoC) or code snippet demonstrating the vulnerability.
+   * Possible system impact.
 
-Nós nos comprometemos a analisar o relatório rapidamente e responder com um plano de mitigação e correção dentro de um prazo adequado.
+We commit to analyzing the report quickly and responding with a mitigation and fix plan within a timely manner.
