@@ -7,6 +7,8 @@ pub struct CacheStats {
     pub capacity: usize,
     pub size: usize,
     pub bytes_used: usize,
+    pub evictions: u64,
+    pub expirations: u64,
 }
 
 #[derive(Debug, Clone)]

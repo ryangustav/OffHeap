@@ -19,6 +19,8 @@ pub struct LruCache {
     tail: Option<usize>, // Least Recently Used
     hits: u64,
     misses: u64,
+    evictions: u64,
+    expirations: u64,
 }
 
 impl LruCache {
@@ -38,6 +40,8 @@ impl LruCache {
             tail: None,
             hits: 0,
             misses: 0,
+            evictions: 0,
+            expirations: 0,
         }
     }
 
@@ -99,6 +103,7 @@ impl CacheImpl for LruCache {
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
                 self.misses += 1;
+                self.expirations += 1;
                 (None, Some(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
@@ -122,6 +127,7 @@ impl CacheImpl for LruCache {
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
                 self.misses += 1;
+                self.expirations += 1;
                 (None, Some(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
@@ -143,6 +149,7 @@ impl CacheImpl for LruCache {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
+                self.expirations += 1;
                 (false, Some(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
@@ -166,17 +173,18 @@ impl CacheImpl for LruCache {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
+                self.expirations += 1;
                 evictions.get_or_insert_with(Vec::new).push(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
                     reason: "expired".to_string(),
                 });
-                
                 if self.map.len() >= self.capacity && self.capacity > 0 {
                     if let Some(t_idx) = self.tail {
                         let (ev_key, ev_entry) = self.remove_node(t_idx);
                         self.bytes_used -= ev_key.len() + ev_entry.value.len();
                         self.map.remove(&ev_key);
+                        self.evictions += 1;
                         evictions.get_or_insert_with(Vec::new).push(Eviction {
                             key: ev_key,
                             value: ev_entry.value,
@@ -219,6 +227,7 @@ impl CacheImpl for LruCache {
                     let (ev_key, ev_entry) = self.remove_node(t_idx);
                     self.bytes_used -= ev_key.len() + ev_entry.value.len();
                     self.map.remove(&ev_key);
+                    self.evictions += 1;
                     evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: ev_key,
                         value: ev_entry.value,
@@ -253,6 +262,7 @@ impl CacheImpl for LruCache {
                     let (evicted_key, evicted_entry) = self.remove_node(t_idx);
                     self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                     self.map.remove(&evicted_key);
+                    self.evictions += 1;
                     evictions.get_or_insert_with(Vec::new).push(Eviction {
                         key: evicted_key,
                         value: evicted_entry.value,
@@ -273,6 +283,7 @@ impl CacheImpl for LruCache {
                 let (evicted_key, evicted_entry) = self.remove_node(node_idx);
                 self.bytes_used -= evicted_key.len() + evicted_entry.value.len();
                 self.map.remove(key);
+                self.expirations += 1;
                 (false, Some(Eviction {
                     key: evicted_key,
                     value: evicted_entry.value,
@@ -310,6 +321,8 @@ impl CacheImpl for LruCache {
         self.tail = None;
         self.hits = 0;
         self.misses = 0;
+        self.evictions = 0;
+        self.expirations = 0;
         self.bytes_used = 0;
     }
 
@@ -320,6 +333,8 @@ impl CacheImpl for LruCache {
             capacity: self.capacity,
             size: self.map.len(),
             bytes_used: self.bytes_used,
+            evictions: self.evictions,
+            expirations: self.expirations,
         }
     }
 

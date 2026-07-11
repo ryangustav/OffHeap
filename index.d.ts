@@ -20,6 +20,10 @@ export interface TtlConfig {
   mode?: 'absolute' | 'sliding';
 }
 
+export interface MonitoringConfig {
+  minIntervalMs?: number;
+}
+
 export interface CacheHooks {
   onEvict?: (key: string, value: any, reason: 'evicted' | 'replaced') => void;
   onExpire?: (key: string, value: any) => void;
@@ -33,6 +37,7 @@ export interface CacheConfig {
   l1?: L1Config;
   ttl?: TtlConfig;
   hooks?: CacheHooks;
+  monitoring?: MonitoringConfig;
   
   // Legacy options (Backward Compatibility)
   policy?: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
@@ -48,12 +53,65 @@ export interface SetOptions {
   minSizeBytes?: number;
 }
 
+export interface ShardDetail {
+  size: number;
+  bytesUsed: number;
+}
+
+export interface ShardsStats {
+  count: number;
+  details: ShardDetail[];
+  sizeStdDev: number;
+}
+
+export interface MemoryStats {
+  payloadBytes: number;
+  processRss: number;
+}
+
 export interface CacheStats {
   hits: number;
   misses: number;
   capacity: number;
   size: number;
   bytesUsed: number;
+  sets: number;
+  deletes: number;
+  evictions: number;
+  expirations: number;
+  hitRate: number;
+  uptimeMs: number;
+  shards: ShardsStats;
+  memory: MemoryStats;
+  l1: {
+    size: number;
+    capacity: number;
+  };
+}
+
+export interface StatusDelta {
+  hits: number;
+  misses: number;
+  sets: number;
+  deletes: number;
+  evictions: number;
+  expirations: number;
+}
+
+export interface StatusRates {
+  opsPerSec: number;
+  hitsPerSec: number;
+  missesPerSec: number;
+  setsPerSec: number;
+  hitRate: number | null;
+}
+
+export interface StatusSnapshot {
+  totals: StatusDelta;
+  delta: StatusDelta;
+  rates: StatusRates;
+  intervalMs: number;
+  timestamp: number;
 }
 
 export class Cache {
@@ -73,6 +131,7 @@ export class Cache {
   mdelete(keys: string[]): number;
   dispose(): void;
   getOrSet<T = any>(key: string, factory: () => T | Promise<T>, ttlMs?: number): T | Promise<T>;
+  monitor(callback: (snapshot: StatusSnapshot) => void, intervalMs?: number): () => void;
 }
 
 export class CacheManager {

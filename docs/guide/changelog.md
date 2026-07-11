@@ -2,6 +2,20 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.4.0] - 2026-07-11
+
+### Added
+* **Reactive Lifecycle Hooks**: Introduced `onEvict`, `onExpire`, and `onMiss` lifecycle hooks across LRU, ARC, and W-TinyLFU eviction policies with zero-allocation fast-paths when hooks are not configured.
+* **Enriched Statistics System**: Added `.stats()` telemetry fields including `sets`, `deletes`, `evictions`, `expirations`, `hitRate`, and `uptimeMs`.
+* **Real-time Status Monitoring Engine**: Added `.monitor(callback, intervalMs)` to poll delta statistics and metrics rates (e.g. operations/second) in real-time, guarded by a hard safety floor of `16ms`.
+* **Shard Imbalance Analysis**: Exposes a per-shard statistics array and computes standard deviation of shard sizes (`sizeStdDev`) to help developers locate hash collision or key distribution issues.
+* **Memory RSS Telemetry**: Exposes process RSS (`processRss`) next to cached payload bytes (`payloadBytes`) to help developers distinguish between theoretical off-heap payload usage and actual native memory allocation footprints.
+
+### Fixed
+* **JS Wrapper Cache Isolation & Persistence**: Configured `CacheManager` to cache initialized `Cache` wrapper instances, preserving their custom settings (such as hooks or monitoring intervals) and L1 heap caches during subsequent retrieval.
+
+---
+
 ## [0.3.12] - 2026-07-09
 
 ### Fixed

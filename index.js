@@ -38,6 +38,9 @@ const DEFAULT_CONFIG = {
   ttl: {
     defaultMs: undefined,
     mode: 'absolute', // absolute or sliding
+  },
+  monitoring: {
+    minIntervalMs: 500,
   }
 };
 
@@ -81,6 +84,13 @@ function normalizeConfig(config) {
       capacity: config.l1Capacity,
       ...config.l1
     };
+  }
+
+  // Monitoring normalization
+  if (config.monitoring !== undefined) {
+    normalized.monitoring = typeof config.monitoring === 'object'
+      ? config.monitoring
+      : { minIntervalMs: config.monitoring };
   }
 
   return normalized;
@@ -268,13 +278,118 @@ class Cache {
 
   stats() {
     const rawStats = this._native.stats();
+
+    // Shards analysis
+    const shardSizes = rawStats.shards.map(s => s.size);
+    const shardCount = shardSizes.length;
+    const sizeMean = shardSizes.reduce((a, b) => a + b, 0) / shardCount;
+    const sizeStdDev = Math.sqrt(
+      shardSizes.reduce((a, b) => a + Math.pow(b - sizeMean, 2), 0) / shardCount
+    );
+
     return {
       hits: rawStats.hits,
       misses: rawStats.misses,
       capacity: rawStats.capacity,
       size: rawStats.size,
       bytesUsed: rawStats.bytesUsed,
+      sets: rawStats.sets,
+      deletes: rawStats.deletes,
+      evictions: rawStats.evictions,
+      expirations: rawStats.expirations,
+      hitRate: rawStats.hitRate,
+      uptimeMs: rawStats.uptimeMs,
+      shards: {
+        count: shardCount,
+        details: rawStats.shards.map(s => ({
+          size: s.size,
+          bytesUsed: s.bytes_used || s.bytesUsed,
+        })),
+        sizeStdDev: Math.round(sizeStdDev * 100) / 100,
+      },
+      memory: {
+        payloadBytes: rawStats.bytesUsed,
+        processRss: process.memoryUsage().rss,
+      },
+      l1: {
+        size: this._l1.size,
+        capacity: this._l1Capacity,
+      },
     };
+  }
+
+  monitor(callback, intervalMs) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('monitor() requires a callback function');
+    }
+
+    const HARD_FLOOR = 16;
+    const configuredMin = (this._config.monitoring && this._config.monitoring.minIntervalMs) !== undefined
+      ? this._config.monitoring.minIntervalMs
+      : 500;
+    const effectiveMin = Math.max(HARD_FLOOR, configuredMin);
+    const interval = intervalMs !== undefined ? intervalMs : effectiveMin;
+
+    if (interval < HARD_FLOOR) {
+      throw new RangeError(
+        `intervalMs ${interval} is below the absolute minimum of ${HARD_FLOOR}ms`
+      );
+    }
+    if (interval < effectiveMin) {
+      throw new RangeError(
+        `intervalMs ${interval} is below configured minIntervalMs ${effectiveMin}`
+      );
+    }
+
+    let prev = this._native.statsCounters();
+    let prevTime = Date.now();
+
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const curr = this._native.statsCounters();
+      const elapsed = (now - prevTime) / 1000;
+
+      const delta = {
+        hits: curr.hits - prev.hits,
+        misses: curr.misses - prev.misses,
+        sets: curr.sets - prev.sets,
+        deletes: curr.deletes - prev.deletes,
+        evictions: curr.evictions - prev.evictions,
+        expirations: curr.expirations - prev.expirations,
+      };
+
+      const totalOps = delta.hits + delta.misses + delta.sets + delta.deletes;
+
+      const snapshot = {
+        totals: {
+          hits: curr.hits,
+          misses: curr.misses,
+          sets: curr.sets,
+          deletes: curr.deletes,
+          evictions: curr.evictions,
+          expirations: curr.expirations,
+        },
+        delta,
+        rates: {
+          opsPerSec: elapsed > 0 ? Math.round(totalOps / elapsed) : 0,
+          hitsPerSec: elapsed > 0 ? Math.round(delta.hits / elapsed) : 0,
+          missesPerSec: elapsed > 0 ? Math.round(delta.misses / elapsed) : 0,
+          setsPerSec: elapsed > 0 ? Math.round(delta.sets / elapsed) : 0,
+          hitRate: (delta.hits + delta.misses) > 0
+            ? delta.hits / (delta.hits + delta.misses)
+            : null,
+        },
+        intervalMs: now - prevTime,
+        timestamp: now,
+      };
+
+      prev = curr;
+      prevTime = now;
+
+      callback(snapshot);
+    }, interval);
+
+    return () => clearInterval(timer);
   }
 
   keys() {
@@ -432,6 +547,7 @@ class CacheManager {
   constructor(globalConfig = {}) {
     this._native = new NativeCacheManager();
     this._globalConfig = mergeConfigs(DEFAULT_CONFIG, normalizeConfig(globalConfig));
+    this._caches = new Map();
   }
 
   createCache(name, config = {}) {
@@ -444,24 +560,34 @@ class CacheManager {
       compression: merged.compression.enabled,
     };
     const nativeCache = this._native.createCache(name, rawConfig);
-    return new Cache(nativeCache, merged);
+    const cache = new Cache(nativeCache, merged);
+    this._caches.set(name, cache);
+    return cache;
   }
 
   getCache(name) {
+    if (this._caches.has(name)) {
+      return this._caches.get(name);
+    }
     const nativeCache = this._native.getCache(name);
     if (!nativeCache) return null;
-    return new Cache(nativeCache, this._globalConfig);
+    const cache = new Cache(nativeCache, this._globalConfig);
+    this._caches.set(name, cache);
+    return cache;
   }
 
   deleteCache(name) {
+    this._caches.delete(name);
     return this._native.deleteCache(name);
   }
 
   clear() {
+    this._caches.clear();
     this._native.clear();
   }
 
   dispose() {
+    this._caches.clear();
     this._native.clear();
   }
 }
