@@ -52,12 +52,12 @@
     "url": "git+https://github.com/ryangustav/OffHeap.git"
   },
   "optionalDependencies": {
-    "@onlykgzin/offheap-win32-x64-msvc": "0.3.12",
-    "@onlykgzin/offheap-darwin-x64": "0.3.12",
-    "@onlykgzin/offheap-linux-x64-gnu": "0.3.12",
-    "@onlykgzin/offheap-linux-x64-musl": "0.3.12",
-    "@onlykgzin/offheap-darwin-arm64": "0.3.12",
-    "@onlykgzin/offheap-linux-arm64-musl": "0.3.12",
-    "@onlykgzin/offheap-linux-arm64-gnu": "0.3.12"
+    "@onlykgzin/offheap-win32-x64-msvc": "0.4.0",
+    "@onlykgzin/offheap-darwin-x64": "0.4.0",
+    "@onlykgzin/offheap-linux-x64-gnu": "0.4.0",
+    "@onlykgzin/offheap-linux-x64-musl": "0.4.0",
+    "@onlykgzin/offheap-darwin-arm64": "0.4.0",
+    "@onlykgzin/offheap-linux-arm64-musl": "0.4.0",
+    "@onlykgzin/offheap-linux-arm64-gnu": "0.4.0"
   }
 }
