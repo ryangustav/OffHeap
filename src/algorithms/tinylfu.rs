@@ -1,8 +1,14 @@
 use std::collections::HashMap;
 use super::{CacheImpl, CacheEntry, CacheStats, Eviction};
 
-// Count-Min Sketch with 4-bit counters and aging.
-// Sized dynamically relative to cache capacity.
+/// Count-Min Sketch with 4-bit saturating counters and periodic halving (aging).
+///
+/// This approximates access frequency for the W-TinyLFU admission policy.
+/// Complexity guarantees:
+/// - **Space**: `O(capacity × 4)` bits, packed into `capacity × 2` bytes
+/// - **Estimate**: minimum of 4 independent hash probes (bounded error, high probability)
+/// - **Aging**: all counters are halved every `capacity × 10` additions to prevent
+///   stale frequency data from blocking new entrants indefinitely
 struct FrequencySketch {
     table: Vec<u8>,
     mask: usize,
@@ -12,7 +18,6 @@ struct FrequencySketch {
 
 impl FrequencySketch {
     fn new(capacity: usize) -> Self {
-        // Number of counters: next power of 2 of capacity * 4, min 128
         let counters = (capacity * 4).next_power_of_two().max(128);
         let bytes = counters / 2;
         Self {

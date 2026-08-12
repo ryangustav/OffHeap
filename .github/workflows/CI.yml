@@ -24,8 +24,33 @@ jobs:
       - name: Run NPM Audit
         run: npm audit --omit=dev
 
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: lint-cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Format Check
+        run: cargo fmt --check
+
   build:
     name: Build
+    needs: [audit, lint]
     strategy:
       fail-fast: false
       matrix:

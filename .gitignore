@@ -19,7 +19,6 @@ temp/
 
 # VitePress cache and output
 **/dist/
-**/cache/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 

@@ -17,7 +17,13 @@ export interface L1Config {
 
 export interface TtlConfig {
   defaultMs?: number;
-  mode?: 'absolute' | 'sliding';
+  /**
+   * TTL renewal mode.
+   * - `'absolute'` (default): TTL is fixed from the time of `set()`.
+   * - `'sliding'`: not yet implemented. Use `touch()` to manually renew TTL.
+   * @todo Implement sliding TTL in a future release.
+   */
+  mode?: 'absolute'; // 'sliding' is declared but not yet implemented
 }
 
 export interface MonitoringConfig {
@@ -38,13 +44,16 @@ export interface CacheConfig {
   ttl?: TtlConfig;
   hooks?: CacheHooks;
   monitoring?: MonitoringConfig;
-  
-  // Legacy options (Backward Compatibility)
+
+  // Legacy flat options (still supported for backwards compatibility)
+  /** @deprecated Use `eviction.policy` instead. */
   policy?: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
+  /** @deprecated Use `eviction.capacity` instead. */
   capacity?: number;
+  /** @deprecated Use `eviction.maxBytes` instead. */
   maxBytes?: number;
+  /** @deprecated Use `l1.capacity` instead. */
   l1Capacity?: number;
-  compressionEnabled?: boolean;
 }
 
 export interface SetOptions {
@@ -118,7 +127,13 @@ export class Cache {
   get<T = any>(key: string): T | undefined;
   peek<T = any>(key: string): T | undefined;
   has(key: string): boolean;
-  set<T = any>(key: string, value: T, ttlMsOrOptions?: number | SetOptions): T | undefined;
+
+  /**
+   * Stores a value in the cache.
+   * Returns `void`. Use `get()` to retrieve the stored value.
+   */
+  set<T = any>(key: string, value: T, ttlMsOrOptions?: number | SetOptions): void;
+
   touch(key: string, ttlMs?: number): boolean;
   delete(key: string): boolean;
   clear(): void;
@@ -126,11 +141,33 @@ export class Cache {
   keys(): string[];
   increment(key: string, delta?: number, ttlMs?: number): number;
   decrement(key: string, delta?: number, ttlMs?: number): number;
-  mget(keys: string[]): Record<string, any>;
+
+  /**
+   * Retrieves multiple keys in a single call.
+   * Keys that are not found (misses) will be absent from the result object.
+   */
+  mget<T = any>(keys: string[]): Partial<Record<string, T>>;
+
   mset(entries: Record<string, any>, ttlMs?: number): void;
   mdelete(keys: string[]): number;
   dispose(): void;
-  getOrSet<T = any>(key: string, factory: () => T | Promise<T>, ttlMs?: number): T | Promise<T>;
+
+  /**
+   * Returns a cached value if it exists, otherwise calls the factory and caches the result.
+   * Concurrent calls for the same key are coalesced — the factory is only called once.
+   */
+  getOrSet<T>(key: string, factory: () => Promise<T>, ttlMs?: number): Promise<T>;
+  getOrSet<T>(key: string, factory: () => T, ttlMs?: number): T;
+
+  /**
+   * Starts a periodic monitoring loop that calls `callback` with a stats snapshot.
+   *
+   * @param callback Called on each monitoring interval with delta ops and rate metrics.
+   * @param intervalMs Polling interval in milliseconds.
+   *   - Defaults to `monitoring.minIntervalMs` (default: `500ms`).
+   *   - Hard floor: `16ms` regardless of configuration.
+   * @returns A disposer function — call it to stop the monitoring loop.
+   */
   monitor(callback: (snapshot: StatusSnapshot) => void, intervalMs?: number): () => void;
 }
 

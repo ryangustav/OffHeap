@@ -2,6 +2,9 @@ const { Cache: NativeCache, CacheManager: NativeCacheManager } = require('./bind
 
 const activePromises = new Map();
 
+// Objects and arrays are serialized as JSON with a 2-byte sentinel prefix "\0J".
+// This signals the Rust layer to store as Tag 3 (JSON) or Tag 5 (LZ4-JSON).
+// Plain strings, numbers, and Buffers pass through without wrapping.
 function wrapValue(val) {
   if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
     return '\0J' + JSON.stringify(val);
@@ -44,11 +47,12 @@ const DEFAULT_CONFIG = {
   }
 };
 
-function mergeConfigs(parent, child) {
+function mergeConfigs(parent, child, _depth = 0) {
+  if (_depth > 5) return child; // safety guard against accidental circular references
   const result = { ...parent };
   for (const k in child) {
     if (child[k] && typeof child[k] === 'object' && !Array.isArray(child[k])) {
-      result[k] = mergeConfigs(parent[k] || {}, child[k]);
+      result[k] = mergeConfigs(parent[k] || {}, child[k], _depth + 1);
     } else if (child[k] !== undefined) {
       result[k] = child[k];
     }
@@ -109,7 +113,7 @@ function validateKey(key) {
 class Cache {
   constructor(nativeCache, config = {}) {
     this._native = nativeCache;
-    this._id = Math.random().toString(36).substring(2);
+    this._id = crypto.randomUUID();
     this._config = config;
     
     // Set up L1 Cache
@@ -223,18 +227,13 @@ class Cache {
 
     const wrapped = wrapValue(value);
 
-    // ⚠️ CRITICAL PATH: Do NOT introduce slow checks or traversals (like Buffer.byteLength)
-    // inside this block if compression is disabled. The default path (compression: false)
-    // is measured to maintain 757k+ write ops/sec. Only perform length queries when compression is active.
-    let forceCompression = undefined;
-    if (typeof wrapped === 'string' && wrapped.startsWith('\0J')) {
-      if (!compression) {
-        forceCompression = false;
-      } else {
-        const payloadSize = Buffer.byteLength(wrapped) - 2; // Subtract 2 bytes for '\0J' prefix
-        forceCompression = payloadSize >= minSizeBytes;
-      }
-    }
+    // ⚠️ CRITICAL PATH: Buffer.byteLength is only called when compression is active.
+    // The default path (compression: false) must stay allocation-free and branch-minimal
+    // to maintain 757k+ write ops/sec. Do not add checks here without profiling first.
+    const isJsonPayload = typeof wrapped === 'string' && wrapped.startsWith('\0J');
+    const forceCompression = isJsonPayload
+      ? (compression && (Buffer.byteLength(wrapped) - 2) >= minSizeBytes) // subtract 2-byte '\0J' prefix
+      : undefined;
 
     const evictions = this._native.set(key, wrapped, ttlMs, forceCompression);
     if (Array.isArray(evictions)) {
@@ -574,6 +573,9 @@ class CacheManager {
       maxBytes: merged.eviction.maxBytes,
       compression: merged.compression.enabled,
     };
+    if (!rawConfig.capacity || rawConfig.capacity <= 0) {
+      throw new RangeError(`Cache '${name}' capacity must be a positive integer, got: ${rawConfig.capacity}`);
+    }
     const nativeCache = this._native.createCache(name, rawConfig);
     const cache = new Cache(nativeCache, merged);
     this._caches.set(name, cache);

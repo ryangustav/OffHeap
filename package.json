@@ -33,6 +33,8 @@
     "postinstall": "node scripts/postinstall.js",
     "test": "node --test tests/index.test.js",
     "benchmark": "node --expose-gc benchmarks/js_bench.js",
+    "benchmark:redis": "node --expose-gc benchmarks/redis_bench.js",
+    "benchmark:all": "node --expose-gc benchmarks/js_bench.js && node --expose-gc benchmarks/redis_bench.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
