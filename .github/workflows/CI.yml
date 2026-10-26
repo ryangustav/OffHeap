@@ -114,6 +114,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=optional
 
+      - name: Patch napi-rs zig linker arguments
+        if: contains(matrix.settings.target, 'aarch64-unknown-linux')
+        run: node scripts/patch-napi-zig-linker.js
+
       - name: Build
         run: |
           if [[ "${{ matrix.settings.target }}" == *"aarch64-unknown-linux"* ]] || [[ "${{ matrix.settings.target }}" == *"musl"* ]]; then

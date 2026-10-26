@@ -89,12 +89,13 @@ test('Expiration - sliding TTL is extended by reads', async () => {
   const manager = new CacheManager();
   const cache = manager.createCache('sliding', { ttl: { mode: 'sliding' } });
 
-  cache.set('k', 'v', 50);
-  for (let i = 0; i < 4; i++) {
-    await sleep(25);
+  // Reads every 60ms keep a 200ms TTL alive well past its original deadline.
+  cache.set('k', 'v', 200);
+  for (let i = 0; i < 5; i++) {
+    await sleep(60);
     assert.strictEqual(cache.get('k'), 'v');
   }
-  await sleep(80);
+  await sleep(300);
   assert.strictEqual(cache.get('k'), undefined);
   manager.deleteCache('sliding');
 
@@ -105,12 +106,12 @@ test('Expiration - sliding TTL in L1-only mode', async () => {
   const manager = new CacheManager();
   const cache = manager.createCache('sliding-l1', { l2: { enabled: false }, ttl: { mode: 'sliding' } });
 
-  cache.set('k', 'v', 50);
-  for (let i = 0; i < 4; i++) {
-    await sleep(25);
+  cache.set('k', 'v', 200);
+  for (let i = 0; i < 5; i++) {
+    await sleep(60);
     assert.strictEqual(cache.get('k'), 'v');
   }
-  await sleep(80);
+  await sleep(300);
   assert.strictEqual(cache.get('k'), undefined);
   manager.deleteCache('sliding-l1');
 });

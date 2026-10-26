@@ -349,9 +349,9 @@ mod tests {
     #[test]
     fn test_lru_expiry() {
         let mut cache = LruCache::new(2);
-        set(&mut cache, "a", 1, Some(10)); // 10ms
+        set(&mut cache, "a", 1, Some(100)); // generous TTL: CI runners can stall
         assert_eq!(get(&mut cache, "a"), Some(vec![1]));
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(get(&mut cache, "a"), None);
     }
 
@@ -387,11 +387,14 @@ mod tests {
 
     #[test]
     fn test_lru_sliding() {
+        // Reads every 50ms keep a 200ms TTL alive well past its original deadline.
         let mut cache = LruCache::with_options(2, None, true);
-        set(&mut cache, "a", 1, Some(30));
-        for _ in 0..4 {
-            std::thread::sleep(std::time::Duration::from_millis(15));
+        set(&mut cache, "a", 1, Some(200));
+        for _ in 0..6 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
             assert_eq!(get(&mut cache, "a"), Some(vec![1]));
         }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(get(&mut cache, "a"), None);
     }
 }
