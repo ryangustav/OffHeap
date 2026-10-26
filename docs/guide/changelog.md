@@ -2,6 +2,40 @@
 
 All notable changes to the OffHeap project are documented here.
 
+## [0.5.0] - 2026-10-26
+
+### Added
+* **Redis L3 Distributed Cache Layer**: Added support for an optional distributed read-through / write-through L3 Cache layer, managed entirely in JavaScript using `ioredis`.
+* **Asynchronous Retrieval Method (`getAsync`)**: Introduced `cache.getAsync(key)` to retrieve keys asynchronously from the cache, querying L3 Redis and back-populating L2 and L1 layers on a local miss.
+* **Grouped Pipeline Operations**: Configured the L3 read path to fetch the payload and PTTL (remaining TTL) in a single grouped pipeline query to preserve the original expiration lifespan.
+* **Single-Flight Coalescing (Stampede Protection)**: Integrated the Redis lookup and factory calls into a single-flight Promise, guaranteeing that only 1 Redis query and 1 factory execution are triggered under concurrent calls.
+* **Graceful Connection Degradation**: Implemented silent recovery for L3 read/write errors. When Redis is disconnected or throws, the cache falls back to L1/L2 and triggers the optional `onError` hook instead of crashing.
+* **L3 Stats Reporting**: Added the `l3` status report inside the `.stats()` telemetry payload to easily check L3 connection state.
+* **TTL-aware native reads**: New native `getWithTtl` / `mgetWithTtl` return `[value, remainingTtlMs]` for entries with a TTL, so L1 can expire its copy together with L2.
+* **L1 hit counter**: `stats().l1.hits` reports reads served by the JS L1 layer.
+
+* **Cross-thread L1 invalidation**: writes from any thread (or another wrapper of the same cache) invalidate other threads' L1 copies through per-wrapper generation tables in native memory (`l1.sharedInvalidation`, default on).
+* **Active expiration**: writes sweep a few slots of their shard for expired entries; new `cache.purgeExpired()` and `ttl.sweepIntervalMs` remove never-read expired entries.
+* **Sliding TTL**: `ttl.mode: 'sliding'` is now implemented (it was accepted but ignored); invalid modes throw.
+* **`getOrSetAsync()`**: always returns a Promise.
+* **`nativeVersion`**: exported version of the native addon; a mismatch with the JS wrapper emits an `OFFHEAP_NATIVE_MISMATCH` warning.
+
+### Changed
+* **Native storage**: one seeded `foldhash` hash per operation shared by shard routing, the `hashbrown` index and the TinyLFU sketch; keys stored once; values held as `Bytes` so reads no longer copy the payload inside the lock. Measured locally: ~18% faster `set`, ~20% faster `get`, ~15% lower RSS for 300k string entries.
+* **Default shard count**: 4 per CPU (power of two, 8-256), reduced so every shard holds at least 64 entries (previously a fixed 8, which split small caches into near-empty shards and over-allocated their capacity).
+* **Key validation**: keys up to 2730 UTF-16 code units skip the UTF-8 byte count.
+
+### Fixed
+* **Strings starting with `"\0J"` were decoded as JSON**: `set('k', '\0J{"admin":true}')` read back as an object (and malformed ones threw). Strings starting with `"\0"` are now stored JSON-encoded; existing data is unaffected.
+* **L1 served expired values**: A key read once into L1 kept being returned after its TTL expired (and `has()` kept returning `true`) until the L1 FIFO pushed it out. L1 now tracks the remaining TTL of each entry. With older native binaries (without `getWithTtl`), L1 stops being filled from L2 once TTLs are in use.
+* **L1-only mode ignored TTL**: With `l2: { enabled: false }`, `set(key, value, ttlMs)` and `touch()` now honour TTLs.
+* **`mset` ignored `ttl.defaultMs`**: `mset` now applies the default TTL like `set()`.
+* **Redis L3 consistency**: `mset` now writes through to Redis, `mdelete` propagates deletions, and `increment`/`decrement` invalidate the stale Redis copy.
+* **Missing hooks on L3 back-population**: L2 evictions caused by `getAsync`/`getOrSet` back-filling from Redis now fire `onEvict`/`onExpire`.
+* **Shard poisoning in native `mget`**: A deserialization error in the middle of `mget` left the shard unusable (`Cache has been disposed or poisoned`). The shard is now restored before converting values to JS.
+
+---
+
 ## [0.4.0] - 2026-07-11
 
 ### Added

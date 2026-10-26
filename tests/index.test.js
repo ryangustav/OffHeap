@@ -18,6 +18,8 @@ test('CacheManager - isolated caches', () => {
   const statsRight = cache1.stats();
   statsLeft.memory.processRss = 0;
   statsRight.memory.processRss = 0;
+  statsLeft.uptimeMs = 0;
+  statsRight.uptimeMs = 0;
   assert.deepStrictEqual(statsLeft, statsRight);
   
   manager.deleteCache('lru-1');

@@ -7,16 +7,37 @@ graph TD
     Manager -->|Instantiates| Cache1[Cache: 'Sessions']
     Manager -->|Instantiates| Cache2[Cache: 'Products']
     
+    subgraph V8 Heap Space
+        Cache2 --> L1[L1 Cache: JS Map]
+    end
+
     subgraph Rust Memory Space (Off-Heap)
-        Cache2 --> Lock[Mutex Lock]
-        Lock --> Core[Cache Core Engine]
+        Cache2 --> L2[L2 Cache: Sharded Mutex]
+        L2 --> Core[Cache Core Engine]
         Core --> LRU[LRU Eviction]
         Core --> ARC[ARC Eviction]
         Core --> TinyLFU[W-TinyLFU Eviction]
-        
-        TinyLFU -.-> Sketch[4-bit Count-Min Sketch]
+    end
+
+    subgraph Remote Network Space
+        Cache2 --> L3[L3 Cache: Redis]
     end
 ```
+
+## Three-Layer Hybrid Caching (L1 + L2 + L3)
+
+OffHeap supports an optional three-layer hybrid caching hierarchy to optimize local memory footprint, cross-thread sharing, and multi-node shared state:
+
+1. **L1 (V8 Heap - Fast Read Layer)**: A lightweight, thread-local FIFO memory layer in the JS heap. It captures extreme recency bursts and reads in sub-microsecond speeds without FFI overhead.
+2. **L2 (Off-Heap Rust - Core Engine)**: A sharded, thread-safe, and process-wide cache stored in Rust memory. It implements advanced eviction policies (LRU, ARC, W-TinyLFU) and is shared across all Node.js worker threads without Structured Clone serialization costs.
+3. **L3 (Redis - Distributed Layer)**: An optional read-through / write-through shared Redis cache. It acts as a distributed "warm" layer shared across different physical servers or containers.
+
+### L3 Design Principles
+- **Grouped Pipeline Operations**: `getAsync` fetches the payload and PTTL (remaining TTL) using a pipeline grouped call in a single network round-trip. This ensures the native L2 cache is back-populated with the exact remaining TTL, preventing cache lifespan extension.
+- **Single-Flight Coalescing**: Stampede protection covers the entire L3 check + factory path. Concurrent requests for a missing key resolve through a single Promise, yielding exactly 1 Redis read and 1 database/factory execution.
+- **Graceful Degradation**: If the Redis server experiences a connection failure or timeout, L3 read/write errors are handled as silent misses. The local L1+L2 layers continue to function normally, triggering the user's `onError` logging hook without throwing exceptions to the caller.
+
+---
 
 ## V8 Heap vs. Off-Heap Caching
 
@@ -66,5 +87,18 @@ Unlike pure JavaScript where memory is strictly isolated between worker threads 
 * **OS Process-Level Registry**: In Rust, the cache manager stores references to all active `Cache` instances in a process-wide global static map.
 * **Thread-Safe Memory Sharing**: Because the Rust library is loaded once per process, multiple worker threads calling `.getCache(name)` receive native cache wrappers pointing to the same underlying thread-safe atomic pointer (`Arc<Mutex<...>>`) to the cache shards.
 * **Zero Serialization Overhead**: Threads read and write directly to/from the same native memory space, completely bypassing the V8 Structured Clone algorithm and `postMessage` overhead.
-* **Consistency Options**: While L2 cache is strictly consistent process-wide, the optional JS-level L1 cache is thread-local. For absolute consistency across workers (at the expense of L1 cache acceleration), L1 can be disabled.
+* **Consistency Options**: L2 is strictly consistent process-wide. The JS-level L1 cache is thread-local, but writes invalidate it across threads (see below). For strict read-your-writes across workers, L1 can still be disabled.
+
+### Cross-thread L1 invalidation
+
+Each JS `Cache` wrapper (one per thread) registers its own table of 4096 `u32` generation counters in native memory and reads it through an `ArrayBuffer`. Every native write (`set`, `delete`, `touch`, `increment`, batch variants, `clear`) bumps `table[slot(key)]` in all registered tables, where `slot` is FNV-1a over the key's UTF-16 code units, computed identically in Rust and JS.
+
+An L1 entry stores the slot generation observed **before** the value was read from L2, and is served only while that generation is unchanged. A write racing with the read can therefore only cause an extra L2 read, never a stale L1 hit after the bump is visible. V8 does not allow two ArrayBuffers over the same memory, which is why each wrapper gets its own table instead of sharing one.
+
+## Native Storage Layout
+
+* **One hash per operation**: a seeded `foldhash` hash of the key picks the shard (upper 32 bits), indexes the key inside the shard (`hashbrown::HashTable`, low bits) and feeds the TinyLFU sketch (re-mixed).
+* **Keys stored once**: the index holds only slab positions; the key lives in the node next to its cached hash.
+* **Values as `Bytes`**: reading a value out of the shard lock is a reference-count bump; the payload is copied once, straight into the JS value.
+* **Active expiration**: expiration is checked on access, and every write also inspects 4 slab slots of its shard (round-robin) once TTLs are in use, so never-read expired entries cannot pile up. `purgeExpired()` and `ttl.sweepIntervalMs` sweep explicitly.
 

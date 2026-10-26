@@ -1,3 +1,7 @@
+export interface L2Config {
+  enabled: boolean;
+}
+
 export interface EvictionConfig {
   policy: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
   capacity: number;
@@ -13,11 +17,19 @@ export interface CompressionConfig {
 export interface L1Config {
   enabled: boolean;
   capacity?: number;
+  /**
+   * Drop L1 copies of keys written by other threads (or other wrappers of the same cache).
+   * Default `true`. Requires a runtime that allows external ArrayBuffers.
+   */
+  sharedInvalidation?: boolean;
 }
 
 export interface TtlConfig {
   defaultMs?: number;
+  /** `sliding`: every read restarts the entry's TTL window. Default `absolute`. */
   mode?: 'absolute' | 'sliding';
+  /** Periodically removes expired entries that are never read again. Off by default. */
+  sweepIntervalMs?: number;
 }
 
 export interface MonitoringConfig {
@@ -30,14 +42,23 @@ export interface CacheHooks {
   onMiss?: (key: string) => void;
 }
 
+export interface RedisL3Config {
+  client: any;
+  keyPrefix?: string;
+  onError?: (err: Error, op: 'get' | 'set' | 'delete', key: string) => void;
+}
+
 export interface CacheConfig {
+  /** Default: 4 per CPU (power of two), reduced so every shard holds at least 64 entries. */
   shards?: number;
   eviction?: EvictionConfig;
   compression?: CompressionConfig;
   l1?: L1Config;
+  l2?: L2Config;
   ttl?: TtlConfig;
   hooks?: CacheHooks;
   monitoring?: MonitoringConfig;
+  redis?: RedisL3Config;
   
   // Legacy options (Backward Compatibility)
   policy?: 'lru' | 'arc' | 'tinylfu' | 'w-tinylfu';
@@ -86,7 +107,15 @@ export interface CacheStats {
   l1: {
     size: number;
     capacity: number;
+    /** Reads served by L1. They never reach L2, so they are not counted in `hits`. */
+    hits: number;
   };
+  l2: {
+    enabled: boolean;
+  };
+  l3: {
+    connected: boolean;
+  } | null;
 }
 
 export interface StatusDelta {
@@ -116,6 +145,7 @@ export interface StatusSnapshot {
 
 export class Cache {
   get<T = any>(key: string): T | undefined;
+  getAsync<T = any>(key: string): Promise<T | undefined>;
   peek<T = any>(key: string): T | undefined;
   has(key: string): boolean;
   set<T = any>(key: string, value: T, ttlMsOrOptions?: number | SetOptions): T | undefined;
@@ -131,6 +161,13 @@ export class Cache {
   mdelete(keys: string[]): number;
   dispose(): void;
   getOrSet<T = any>(key: string, factory: () => T | Promise<T>, ttlMs?: number): T | Promise<T>;
+  /** Like `getOrSet`, but always returns a Promise. */
+  getOrSetAsync<T = any>(key: string, factory: () => T | Promise<T>, ttlMs?: number): Promise<T>;
+  /**
+   * Removes expired entries that were never read again, firing `onExpire` for each.
+   * Scans up to `maxScanPerShard` slots per shard (default: all). Returns the number removed.
+   */
+  purgeExpired(maxScanPerShard?: number): number;
   monitor(callback: (snapshot: StatusSnapshot) => void, intervalMs?: number): () => void;
 }
 
@@ -142,3 +179,6 @@ export class CacheManager {
   clear(): void;
   dispose(): void;
 }
+
+/** Version of the loaded native addon, or `null` for binaries older than 0.5.0. */
+export declare const nativeVersion: string | null;

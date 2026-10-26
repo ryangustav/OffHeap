@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use super::{CacheImpl, CacheEntry, CacheStats, Eviction};
+use bytes::Bytes;
+use super::{now_ms, CacheEntry, CacheImpl, CacheStats, Eviction, IndexedNode, KeyIndex};
 
 // Count-Min Sketch with 4-bit counters and aging.
 // Sized dynamically relative to cache capacity.
@@ -8,6 +8,14 @@ struct FrequencySketch {
     mask: usize,
     sample_size: usize,
     additions: usize,
+}
+
+/// Re-mixes the shared key hash. All keys of a shard agree on the bits used for shard
+/// routing, so the sketch must not consume them raw.
+#[inline]
+fn sketch_hash(hash: u64) -> u64 {
+    let x = (hash ^ (hash >> 31)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^ (x >> 29)
 }
 
 impl FrequencySketch {
@@ -23,8 +31,8 @@ impl FrequencySketch {
         }
     }
 
-    fn increment(&mut self, key: &str) {
-        let hash = seahash::hash(key.as_bytes());
+    fn increment(&mut self, key_hash: u64) {
+        let hash = sketch_hash(key_hash);
         let h1 = (hash & 0xFFFFFFFF) as usize;
         let h2 = (hash >> 32) as usize;
 
@@ -65,8 +73,8 @@ impl FrequencySketch {
         false
     }
 
-    fn estimate(&self, key: &str) -> u8 {
-        let hash = seahash::hash(key.as_bytes());
+    fn estimate(&self, key_hash: u64) -> u8 {
+        let hash = sketch_hash(key_hash);
         let h1 = (hash & 0xFFFFFFFF) as usize;
         let h2 = (hash >> 32) as usize;
 
@@ -110,11 +118,24 @@ enum TinyLfuList {
 }
 
 struct TinyLfuNode {
-    key: String,
+    key: Box<str>,
+    hash: u64,
     entry: CacheEntry,
     list: TinyLfuList,
     prev: Option<usize>,
     next: Option<usize>,
+    live: bool,
+}
+
+impl IndexedNode for TinyLfuNode {
+    #[inline]
+    fn key(&self) -> &str {
+        &self.key
+    }
+    #[inline]
+    fn hash(&self) -> u64 {
+        self.hash
+    }
 }
 
 struct TinyLfuListMetadata {
@@ -133,13 +154,20 @@ impl TinyLfuListMetadata {
             capacity,
         }
     }
+
+    fn reset(&mut self) {
+        self.head = None;
+        self.tail = None;
+        self.len = 0;
+    }
 }
 
 pub struct TinyLfuCache {
     capacity: usize,
     max_bytes: Option<usize>,
     bytes_used: usize,
-    map: HashMap<String, usize>,
+    sliding: bool,
+    index: KeyIndex,
     nodes: Vec<TinyLfuNode>,
     free_nodes: Vec<usize>,
 
@@ -148,6 +176,7 @@ pub struct TinyLfuCache {
     protected: TinyLfuListMetadata,
 
     sketch: FrequencySketch,
+    sweep_cursor: usize,
     hits: u64,
     misses: u64,
     evictions: u64,
@@ -160,6 +189,10 @@ impl TinyLfuCache {
     }
 
     pub fn new_with_max_bytes(capacity: usize, max_bytes: Option<usize>) -> Self {
+        Self::with_options(capacity, max_bytes, false)
+    }
+
+    pub fn with_options(capacity: usize, max_bytes: Option<usize>, sliding: bool) -> Self {
         let window_cap = (capacity / 100).max(1);
         let main_cap = capacity.saturating_sub(window_cap);
 
@@ -175,13 +208,15 @@ impl TinyLfuCache {
             capacity,
             max_bytes,
             bytes_used: 0,
-            map: HashMap::with_capacity(capacity),
+            sliding,
+            index: KeyIndex::with_capacity(capacity),
             nodes: Vec::with_capacity(capacity),
             free_nodes: Vec::new(),
             window: TinyLfuListMetadata::new(window_cap),
             probation: TinyLfuListMetadata::new(probation_cap),
             protected: TinyLfuListMetadata::new(protected_cap),
             sketch: FrequencySketch::new(capacity),
+            sweep_cursor: 0,
             hits: 0,
             misses: 0,
             evictions: 0,
@@ -243,56 +278,72 @@ impl TinyLfuCache {
         meta.len += 1;
     }
 
+    /// Unlinks a node from its list (unless already detached) and the index, frees its slot.
     fn remove_completely(&mut self, idx: usize, already_detached: bool) -> (String, CacheEntry) {
         let bytes = self.node_bytes(idx);
         self.bytes_used -= bytes;
         if !already_detached {
             self.detach(idx);
         }
+        self.index.remove(self.nodes[idx].hash, idx);
         self.free_nodes.push(idx);
-        let key = std::mem::take(&mut self.nodes[idx].key);
-        let entry = std::mem::replace(&mut self.nodes[idx].entry, CacheEntry::new(Vec::new(), None));
-        (key, entry)
+        let node = &mut self.nodes[idx];
+        node.live = false;
+        let key = std::mem::take(&mut node.key);
+        let entry = std::mem::take(&mut node.entry);
+        (key.into_string(), entry)
+    }
+
+    fn expire_node(&mut self, idx: usize) -> Eviction {
+        let (key, entry) = self.remove_completely(idx, false);
+        self.expirations += 1;
+        Eviction::expired(key, entry.value)
+    }
+
+    fn evict_node(&mut self, idx: usize, already_detached: bool) -> Eviction {
+        let (key, entry) = self.remove_completely(idx, already_detached);
+        self.evictions += 1;
+        Eviction::evicted(key, entry.value)
+    }
+
+    /// Recency/frequency promotion shared by reads and in-place updates.
+    fn promote(&mut self, idx: usize) {
+        match self.nodes[idx].list {
+            TinyLfuList::Window => {
+                self.detach(idx);
+                self.attach_to_head(idx, TinyLfuList::Window);
+            }
+            TinyLfuList::Probation => {
+                self.detach(idx);
+                self.attach_to_head(idx, TinyLfuList::Protected);
+
+                if self.protected.len > self.protected.capacity {
+                    if let Some(prot_tail) = self.protected.tail {
+                        self.detach(prot_tail);
+                        self.attach_to_head(prot_tail, TinyLfuList::Probation);
+                    }
+                }
+            }
+            TinyLfuList::Protected => {
+                self.detach(idx);
+                self.attach_to_head(idx, TinyLfuList::Protected);
+            }
+        }
     }
 }
 
 impl CacheImpl for TinyLfuCache {
-    fn get(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
-        self.sketch.increment(key);
+    fn get(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>) {
+        self.sketch.increment(hash);
 
-        if let Some(&idx) = self.map.get(key) {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             if self.nodes[idx].entry.is_expired() {
-                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
-                self.map.remove(&evicted_key);
                 self.misses += 1;
-                self.expirations += 1;
-                (None, Some(Eviction {
-                    key: evicted_key,
-                    value: evicted_entry.value,
-                    reason: "expired".to_string(),
-                }))
+                (None, Some(self.expire_node(idx)))
             } else {
-                let list = self.nodes[idx].list;
-                match list {
-                    TinyLfuList::Window => {
-                        self.detach(idx);
-                        self.attach_to_head(idx, TinyLfuList::Window);
-                    }
-                    TinyLfuList::Probation => {
-                        self.detach(idx);
-                        self.attach_to_head(idx, TinyLfuList::Protected);
-
-                        if self.protected.len > self.protected.capacity {
-                            if let Some(prot_tail) = self.protected.tail {
-                                self.detach(prot_tail);
-                                self.attach_to_head(prot_tail, TinyLfuList::Probation);
-                            }
-                        }
-                    }
-                    TinyLfuList::Protected => {
-                        self.detach(idx);
-                        self.attach_to_head(idx, TinyLfuList::Protected);
-                    }
+                self.promote(idx);
+                if self.sliding {
+                    self.nodes[idx].entry.slide();
                 }
                 self.hits += 1;
                 (Some(self.nodes[idx].entry.value.clone()), None)
@@ -303,18 +354,11 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn peek(&mut self, key: &str) -> (Option<Vec<u8>>, Option<Eviction>) {
-        if let Some(&idx) = self.map.get(key) {
+    fn peek(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>) {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             if self.nodes[idx].entry.is_expired() {
-                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
-                self.map.remove(&evicted_key);
                 self.misses += 1;
-                self.expirations += 1;
-                (None, Some(Eviction {
-                    key: evicted_key,
-                    value: evicted_entry.value,
-                    reason: "expired".to_string(),
-                }))
+                (None, Some(self.expire_node(idx)))
             } else {
                 self.hits += 1;
                 (Some(self.nodes[idx].entry.value.clone()), None)
@@ -325,17 +369,10 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn has(&mut self, key: &str) -> (bool, Option<Eviction>) {
-        if let Some(&idx) = self.map.get(key) {
+    fn has(&mut self, hash: u64, key: &str) -> (bool, Option<Eviction>) {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             if self.nodes[idx].entry.is_expired() {
-                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
-                self.map.remove(&evicted_key);
-                self.expirations += 1;
-                (false, Some(Eviction {
-                    key: evicted_key,
-                    value: evicted_entry.value,
-                    reason: "expired".to_string(),
-                }))
+                (false, Some(self.expire_node(idx)))
             } else {
                 (true, None)
             }
@@ -344,65 +381,44 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn set(&mut self, key: &str, value: Vec<u8>, ttl_ms: Option<u64>) -> (Option<Vec<u8>>, Option<Vec<Eviction>>) {
-        self.sketch.increment(key);
+    fn set(&mut self, hash: u64, key: &str, value: Bytes, ttl_ms: Option<u64>) -> (Option<Bytes>, Option<Vec<Eviction>>) {
+        self.sketch.increment(hash);
 
         let new_entry = CacheEntry::new(value, ttl_ms);
         let new_bytes = key.len() + new_entry.value.len();
         let mut old_value = None;
         let mut evictions: Option<Vec<Eviction>> = None;
 
-        if let Some(&idx) = self.map.get(key) {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             let old_bytes = self.node_bytes(idx);
             old_value = Some(std::mem::replace(&mut self.nodes[idx].entry, new_entry).value);
             self.bytes_used = self.bytes_used + new_bytes - old_bytes;
-
-            let list = self.nodes[idx].list;
-            match list {
-                TinyLfuList::Window => {
-                    self.detach(idx);
-                    self.attach_to_head(idx, TinyLfuList::Window);
-                }
-                TinyLfuList::Probation => {
-                    self.detach(idx);
-                    self.attach_to_head(idx, TinyLfuList::Protected);
-
-                    if self.protected.len > self.protected.capacity {
-                        if let Some(prot_tail) = self.protected.tail {
-                            self.detach(prot_tail);
-                            self.attach_to_head(prot_tail, TinyLfuList::Probation);
-                        }
-                    }
-                }
-                TinyLfuList::Protected => {
-                    self.detach(idx);
-                    self.attach_to_head(idx, TinyLfuList::Protected);
-                }
-            }
+            self.promote(idx);
         } else {
             if self.capacity == 0 {
                 return (None, None);
             }
 
+            let node = TinyLfuNode {
+                key: key.into(),
+                hash,
+                entry: new_entry,
+                list: TinyLfuList::Window,
+                prev: None,
+                next: None,
+                live: true,
+            };
             let new_idx = if let Some(free_idx) = self.free_nodes.pop() {
-                self.nodes[free_idx].key = key.to_string();
-                self.nodes[free_idx].entry = new_entry;
+                self.nodes[free_idx] = node;
                 free_idx
             } else {
-                let free_idx = self.nodes.len();
-                self.nodes.push(TinyLfuNode {
-                    key: key.to_string(),
-                    entry: new_entry,
-                    list: TinyLfuList::Window,
-                    prev: None,
-                    next: None,
-                });
-                free_idx
+                self.nodes.push(node);
+                self.nodes.len() - 1
             };
 
             self.bytes_used += new_bytes;
             self.attach_to_head(new_idx, TinyLfuList::Window);
-            self.map.insert(key.to_string(), new_idx);
+            self.index.insert(&self.nodes, hash, new_idx);
 
             if self.window.len > self.window.capacity {
                 if let Some(win_tail) = self.window.tail {
@@ -414,49 +430,24 @@ impl CacheImpl for TinyLfuCache {
                         let total_size = self.window.len + self.probation.len + self.protected.len;
                         if total_size + 1 <= self.capacity {
                             self.attach_to_head(candidate_idx, TinyLfuList::Probation);
-                        } else {
-                            if let Some(prob_tail) = self.probation.tail {
-                                let victim_idx = prob_tail;
+                        } else if let Some(victim_idx) = self.probation.tail {
+                            let candidate_freq = self.sketch.estimate(self.nodes[candidate_idx].hash);
+                            let victim_freq = self.sketch.estimate(self.nodes[victim_idx].hash);
 
-                                let candidate_key = &self.nodes[candidate_idx].key;
-                                let victim_key = &self.nodes[victim_idx].key;
-
-                                let candidate_freq = self.sketch.estimate(candidate_key);
-                                let victim_freq = self.sketch.estimate(victim_key);
-
-                                if candidate_freq > victim_freq {
-                                    let (evicted_key, evicted_entry) = self.remove_completely(victim_idx, false);
-                                    self.map.remove(&evicted_key);
-                                    self.attach_to_head(candidate_idx, TinyLfuList::Probation);
-                                    self.evictions += 1;
-                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
-                                        key: evicted_key,
-                                        value: evicted_entry.value,
-                                        reason: "evicted".to_string(),
-                                    });
-                                } else {
-                                    let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
-                                    self.map.remove(&evicted_key);
-                                    self.evictions += 1;
-                                    evictions.get_or_insert_with(Vec::new).push(Eviction {
-                                        key: evicted_key,
-                                        value: evicted_entry.value,
-                                        reason: "evicted".to_string(),
-                                    });
-                                }
-                            } else {
+                            if candidate_freq > victim_freq {
+                                let ev = self.evict_node(victim_idx, false);
                                 self.attach_to_head(candidate_idx, TinyLfuList::Probation);
+                                evictions.get_or_insert_with(Vec::new).push(ev);
+                            } else {
+                                let ev = self.evict_node(candidate_idx, true);
+                                evictions.get_or_insert_with(Vec::new).push(ev);
                             }
+                        } else {
+                            self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                         }
                     } else {
-                        let (evicted_key, evicted_entry) = self.remove_completely(candidate_idx, true);
-                        self.map.remove(&evicted_key);
-                        self.evictions += 1;
-                        evictions.get_or_insert_with(Vec::new).push(Eviction {
-                            key: evicted_key,
-                            value: evicted_entry.value,
-                            reason: "evicted".to_string(),
-                        });
+                        let ev = self.evict_node(candidate_idx, true);
+                        evictions.get_or_insert_with(Vec::new).push(ev);
                     }
                 }
             }
@@ -464,26 +455,13 @@ impl CacheImpl for TinyLfuCache {
 
         if let Some(max) = self.max_bytes {
             while self.bytes_used > max && (self.probation.len > 0 || self.window.len > 0) {
-                if let Some(prob_tail) = self.probation.tail {
-                    let (evicted_key, evicted_entry) = self.remove_completely(prob_tail, false);
-                    self.map.remove(&evicted_key);
-                    self.evictions += 1;
-                    evictions.get_or_insert_with(Vec::new).push(Eviction {
-                        key: evicted_key,
-                        value: evicted_entry.value,
-                        reason: "evicted".to_string(),
-                    });
-                } else if let Some(win_tail) = self.window.tail {
-                    let (evicted_key, evicted_entry) = self.remove_completely(win_tail, false);
-                    self.map.remove(&evicted_key);
-                    self.evictions += 1;
-                    evictions.get_or_insert_with(Vec::new).push(Eviction {
-                        key: evicted_key,
-                        value: evicted_entry.value,
-                        reason: "evicted".to_string(),
-                    });
-                } else {
-                    break;
+                let victim = self.probation.tail.or(self.window.tail);
+                match victim {
+                    Some(idx) => {
+                        let ev = self.evict_node(idx, false);
+                        evictions.get_or_insert_with(Vec::new).push(ev);
+                    }
+                    None => break,
                 }
             }
         }
@@ -491,22 +469,12 @@ impl CacheImpl for TinyLfuCache {
         (old_value, evictions)
     }
 
-    fn touch(&mut self, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
-        if let Some(&idx) = self.map.get(key) {
+    fn touch(&mut self, hash: u64, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             if self.nodes[idx].entry.is_expired() {
-                let (evicted_key, evicted_entry) = self.remove_completely(idx, false);
-                self.map.remove(&evicted_key);
-                self.expirations += 1;
-                (false, Some(Eviction {
-                    key: evicted_key,
-                    value: evicted_entry.value,
-                    reason: "expired".to_string(),
-                }))
+                (false, Some(self.expire_node(idx)))
             } else {
-                self.nodes[idx].entry = CacheEntry::new(
-                    self.nodes[idx].entry.value.clone(),
-                    ttl_ms,
-                );
+                self.nodes[idx].entry = self.nodes[idx].entry.with_ttl(ttl_ms);
                 let list = self.nodes[idx].list;
                 self.detach(idx);
                 self.attach_to_head(idx, list);
@@ -517,10 +485,9 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn delete(&mut self, key: &str) -> bool {
-        if let Some(&idx) = self.map.get(key) {
+    fn delete(&mut self, hash: u64, key: &str) -> bool {
+        if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             self.remove_completely(idx, false);
-            self.map.remove(key);
             true
         } else {
             false
@@ -528,18 +495,13 @@ impl CacheImpl for TinyLfuCache {
     }
 
     fn clear(&mut self) {
-        self.map.clear();
+        self.index.clear();
         self.nodes.clear();
         self.free_nodes.clear();
-        self.window.head = None;
-        self.window.tail = None;
-        self.window.len = 0;
-        self.probation.head = None;
-        self.probation.tail = None;
-        self.probation.len = 0;
-        self.protected.head = None;
-        self.protected.tail = None;
-        self.protected.len = 0;
+        self.window.reset();
+        self.probation.reset();
+        self.protected.reset();
+        self.sweep_cursor = 0;
         self.hits = 0;
         self.misses = 0;
         self.evictions = 0;
@@ -561,31 +523,40 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
+    fn ttl_remaining_ms(&self, hash: u64, key: &str) -> Option<u64> {
+        self.index
+            .find(&self.nodes, hash, key)
+            .and_then(|idx| self.nodes[idx].entry.remaining_ms())
+    }
+
+    fn purge_expired(&mut self, max_scan: usize, out: &mut Vec<Eviction>) {
+        let len = self.nodes.len();
+        if len == 0 {
+            return;
+        }
+        let now = now_ms();
+        for _ in 0..max_scan.min(len) {
+            let idx = self.sweep_cursor % len;
+            self.sweep_cursor = idx + 1;
+            let node = &self.nodes[idx];
+            if node.live && node.entry.is_expired_at(now) {
+                let ev = self.expire_node(idx);
+                out.push(ev);
+            }
+        }
+    }
+
     fn keys(&self) -> Vec<String> {
         let mut result = Vec::new();
-        let mut curr = self.window.head;
-        while let Some(idx) = curr {
-            let node = &self.nodes[idx];
-            if !node.entry.is_expired() {
-                result.push(node.key.clone());
+        for head in [self.window.head, self.probation.head, self.protected.head] {
+            let mut curr = head;
+            while let Some(idx) = curr {
+                let node = &self.nodes[idx];
+                if !node.entry.is_expired() {
+                    result.push(node.key.to_string());
+                }
+                curr = node.next;
             }
-            curr = node.next;
-        }
-        let mut curr = self.probation.head;
-        while let Some(idx) = curr {
-            let node = &self.nodes[idx];
-            if !node.entry.is_expired() {
-                result.push(node.key.clone());
-            }
-            curr = node.next;
-        }
-        let mut curr = self.protected.head;
-        while let Some(idx) = curr {
-            let node = &self.nodes[idx];
-            if !node.entry.is_expired() {
-                result.push(node.key.clone());
-            }
-            curr = node.next;
         }
         result
     }
@@ -595,29 +566,72 @@ impl CacheImpl for TinyLfuCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::test_hash as h;
+
+    fn set(cache: &mut TinyLfuCache, key: &str, value: u8, ttl: Option<u64>) {
+        cache.set(h(key), key, Bytes::from(vec![value]), ttl);
+    }
+
+    fn get(cache: &mut TinyLfuCache, key: &str) -> Option<Vec<u8>> {
+        cache.get(h(key), key).0.map(|b| b.to_vec())
+    }
 
     #[test]
     fn test_tinylfu_basic() {
         let mut cache = TinyLfuCache::new(5);
-        
+
         // Fill cache
         for i in 0..5 {
-            cache.set(&format!("key-{}", i), vec![i], None);
+            set(&mut cache, &format!("key-{}", i), i, None);
         }
         assert_eq!(cache.stats().size, 5);
 
         // Increase frequency of key-0 and key-1
         for _ in 0..3 {
-            let _ = cache.get("key-0");
-            let _ = cache.get("key-1");
+            let _ = get(&mut cache, "key-0");
+            let _ = get(&mut cache, "key-1");
         }
 
         // Add a new key. TinyLFU will compare frequency of candidate vs probation victim.
         // It will evict a low-frequency key.
-        cache.set("key-5", vec![5], None);
-        
+        set(&mut cache, "key-5", 5, None);
+
         // key-0 and key-1 must remain because of high frequency.
-        assert!(cache.get("key-0").0.is_some());
-        assert!(cache.get("key-1").0.is_some());
+        assert!(get(&mut cache, "key-0").is_some());
+        assert!(get(&mut cache, "key-1").is_some());
+    }
+
+    #[test]
+    fn test_tinylfu_churn_keeps_accounting() {
+        let mut cache = TinyLfuCache::new(50);
+        for i in 0..2000u32 {
+            let key = format!("k{}", i % 300);
+            set(&mut cache, &key, (i % 251) as u8, if i % 3 == 0 { Some(1_000) } else { None });
+            if i % 7 == 0 {
+                cache.delete(h(&key), &key);
+            }
+        }
+        let keys = cache.keys();
+        assert_eq!(cache.stats().size, keys.len());
+        assert!(keys.len() <= 50);
+        assert_eq!(cache.bytes_used, keys.iter().map(|k| k.len() + 1).sum::<usize>());
+        for k in &keys {
+            assert!(get(&mut cache, k).is_some());
+        }
+    }
+
+    #[test]
+    fn test_tinylfu_purge_expired() {
+        let mut cache = TinyLfuCache::new(100);
+        for i in 0..20 {
+            set(&mut cache, &format!("t{}", i), i, Some(5));
+            set(&mut cache, &format!("p{}", i), i, None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let mut out = Vec::new();
+        cache.purge_expired(1000, &mut out);
+        assert_eq!(out.len(), 20);
+        assert!(out.iter().all(|e| e.reason == "expired" && e.key.starts_with('t')));
+        assert_eq!(cache.stats().size, 20);
     }
 }

@@ -24,6 +24,20 @@ jobs:
       - name: Run NPM Audit
         run: npm audit --omit=dev
 
+  rust-tests:
+    name: Rust unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo tests
+        run: cargo test --lib
+
   build:
     name: Build
     strategy:
@@ -38,14 +52,17 @@ jobs:
             target: x86_64-unknown-linux-musl
             architecture: x64
             test: false
+            docker-test-image: node:20-alpine
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             architecture: arm64
             test: false
+            docker-test-image: node:20-alpine
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             architecture: arm64
             test: false
+            docker-test-image: node:20-slim
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             architecture: x64
@@ -110,12 +127,16 @@ jobs:
         if: matrix.settings.test == true
         run: npm test
 
-      - name: Run tests in Docker (Alpine Musl)
-        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
+      # Targets the runner can't execute natively (musl, arm64) run the full suite in a
+      # container of the matching libc/architecture, emulated through QEMU for arm64.
+      - name: Set up QEMU
+        if: matrix.settings.docker-test-image && matrix.settings.architecture == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Run tests in Docker
+        if: matrix.settings.docker-test-image
         run: |
-          docker run --rm -v "$PWD:/app" -w /app node:20-alpine sh -c "
-            node -e \"const { CacheManager } = require('./index.js'); const m = new CacheManager(); const c = m.createCache('test', { capacity: 10 }); c.set('k', 'v'); console.log('Alpine Link OK:', c.get('k'));\"
-          "
+          docker run --rm --platform linux/${{ matrix.settings.architecture == 'arm64' && 'arm64' || 'amd64' }}             -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} npm test
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

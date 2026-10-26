@@ -1,3 +1,5 @@
+use std::hash::BuildHasher;
+use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use offheap::algorithms::{
     CacheImpl,
@@ -5,6 +7,14 @@ use offheap::algorithms::{
     arc::ArcCache,
     tinylfu::TinyLfuCache,
 };
+
+fn h(key: &str) -> u64 {
+    foldhash::fast::FixedState::with_seed(0).hash_one(key)
+}
+
+fn payload() -> Bytes {
+    Bytes::from_static(&[1, 2, 3])
+}
 
 fn bench_sets(c: &mut Criterion) {
     let mut group = c.benchmark_group("Cache Set");
@@ -15,7 +25,7 @@ fn bench_sets(c: &mut Criterion) {
         let mut i = 0;
         b.iter(|| {
             let key = format!("key-{}", i);
-            cache.set(&key, vec![1, 2, 3], None);
+            cache.set(h(&key), &key, payload(), None);
             i += 1;
         });
     });
@@ -25,7 +35,7 @@ fn bench_sets(c: &mut Criterion) {
         let mut i = 0;
         b.iter(|| {
             let key = format!("key-{}", i);
-            cache.set(&key, vec![1, 2, 3], None);
+            cache.set(h(&key), &key, payload(), None);
             i += 1;
         });
     });
@@ -35,7 +45,7 @@ fn bench_sets(c: &mut Criterion) {
         let mut i = 0;
         b.iter(|| {
             let key = format!("key-{}", i);
-            cache.set(&key, vec![1, 2, 3], None);
+            cache.set(h(&key), &key, payload(), None);
             i += 1;
         });
     });
@@ -50,13 +60,14 @@ fn bench_gets(c: &mut Criterion) {
     // LRU Warm up
     let mut lru = LruCache::new(capacity);
     for i in 0..capacity {
-        lru.set(&format!("key-{}", i), vec![1, 2, 3], None);
+        { let key = format!("key-{}", i); lru.set(h(&key), &key, payload(), None); };
     }
     
     group.bench_function("LRU Get Hit", |b| {
         let mut i = 0;
         b.iter(|| {
-            lru.get(&format!("key-{}", i % capacity));
+            let key = format!("key-{}", i % capacity);
+            lru.get(h(&key), &key);
             i += 1;
         });
     });
@@ -64,13 +75,14 @@ fn bench_gets(c: &mut Criterion) {
     // ARC Warm up
     let mut arc = ArcCache::new(capacity);
     for i in 0..capacity {
-        arc.set(&format!("key-{}", i), vec![1, 2, 3], None);
+        { let key = format!("key-{}", i); arc.set(h(&key), &key, payload(), None); };
     }
 
     group.bench_function("ARC Get Hit", |b| {
         let mut i = 0;
         b.iter(|| {
-            arc.get(&format!("key-{}", i % capacity));
+            let key = format!("key-{}", i % capacity);
+            arc.get(h(&key), &key);
             i += 1;
         });
     });
@@ -78,13 +90,14 @@ fn bench_gets(c: &mut Criterion) {
     // TinyLFU Warm up
     let mut tinylfu = TinyLfuCache::new(capacity);
     for i in 0..capacity {
-        tinylfu.set(&format!("key-{}", i), vec![1, 2, 3], None);
+        { let key = format!("key-{}", i); tinylfu.set(h(&key), &key, payload(), None); };
     }
 
     group.bench_function("W-TinyLFU Get Hit", |b| {
         let mut i = 0;
         b.iter(|| {
-            tinylfu.get(&format!("key-{}", i % capacity));
+            let key = format!("key-{}", i % capacity);
+            tinylfu.get(h(&key), &key);
             i += 1;
         });
     });
