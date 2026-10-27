@@ -44,13 +44,27 @@ jobs:
             target/
           key: lint-cargo-${{ hashFiles('**/Cargo.toml') }}
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
       - name: Format Check
         run: cargo fmt --check
 
+  rust-tests:
+    name: Rust unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo tests
+        run: cargo test --lib
+
   build:
     name: Build
-    needs: [audit, lint]
+    needs: [audit, lint, rust-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -63,14 +77,17 @@ jobs:
             target: x86_64-unknown-linux-musl
             architecture: x64
             test: false
+            docker-test-image: node:20-alpine
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             architecture: arm64
             test: false
+            docker-test-image: node:20-alpine
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             architecture: arm64
             test: false
+            docker-test-image: node:20-slim
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             architecture: x64
@@ -122,6 +139,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=optional
 
+      - name: Patch napi-rs zig linker arguments
+        if: contains(matrix.settings.target, 'aarch64-unknown-linux')
+        run: node scripts/patch-napi-zig-linker.js
+
       - name: Build
         run: |
           if [[ "${{ matrix.settings.target }}" == *"aarch64-unknown-linux"* ]] || [[ "${{ matrix.settings.target }}" == *"musl"* ]]; then
@@ -135,12 +156,24 @@ jobs:
         if: matrix.settings.test == true
         run: npm test
 
-      - name: Run tests in Docker (Alpine Musl)
-        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
+      # Targets the runner can't execute natively (musl, arm64) run the full suite in a
+      # container of the matching libc/architecture, emulated through QEMU for arm64.
+      - name: Set up QEMU
+        if: matrix.settings.docker-test-image && matrix.settings.architecture == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Run tests in Docker
+        if: matrix.settings.docker-test-image
         run: |
-          docker run --rm -v "$PWD:/app" -w /app node:20-alpine sh -c "
-            node -e \"const { CacheManager } = require('./index.js'); const m = new CacheManager(); const c = m.createCache('test', { capacity: 10 }); c.set('k', 'v'); console.log('Alpine Link OK:', c.get('k'));\"
-          "
+          # OFFHEAP_EMULATED_CPU skips throughput assertions that QEMU cannot meet.
+          docker run --rm --platform linux/${{ matrix.settings.architecture == 'arm64' && 'arm64' || 'amd64' }} \
+            -e OFFHEAP_EMULATED_CPU=${{ matrix.settings.architecture == 'arm64' && '1' || '' }} \
+            -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} \
+            sh -c 'npm test > test-output.txt 2>&1; code=$?; cat test-output.txt; exit $code'
+
+      - name: Annotate failed tests
+        if: failure() && matrix.settings.docker-test-image
+        run: node scripts/ci-annotate-test-failures.js test-output.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

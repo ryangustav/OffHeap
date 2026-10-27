@@ -1,9 +1,15 @@
 [package]
 name = "offheap"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["Ryan Gustavo"]
 license = "MIT OR Apache-2.0"
+description = "Off-heap in-memory cache for Node.js (NAPI-RS): sharded LRU, ARC and W-TinyLFU with TTL and LZ4 compression"
+repository = "https://github.com/ryangustav/OffHeap"
+homepage = "https://github.com/ryangustav/OffHeap#readme"
+readme = "README.md"
+keywords = ["cache", "off-heap", "memory-cache", "tinylfu", "napi"]
+categories = ["caching", "memory-management", "data-structures", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -18,6 +24,9 @@ seahash = "4.1.0"
 rand = "0.8.5"
 mimalloc = { version = "0.1.43", features = ["local_dynamic_tls"] }
 lz4_flex = "0.11.3"
+hashbrown = { version = "0.15", default-features = false, features = ["inline-more"] }
+foldhash = "0.1"
+bytes = "1"
 
 [build-dependencies]
 napi-build = "2.1.3"

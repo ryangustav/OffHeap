@@ -6,8 +6,18 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
+[![Rust](https://img.shields.io/badge/Rust-NAPI--RS-orange.svg?logo=rust)](https://napi.rs)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933.svg?logo=node.js)](https://nodejs.org)
 
-**OffHeap** is a high-performance, in-process, off-heap caching framework for Node.js written from scratch in **Rust** using **NAPI-RS**. It is designed to isolate cached items outside the V8 heap, eliminating V8 Garbage Collection (GC) sweeps and event loop Stop-the-World (STW) pauses.
+**OffHeap** is a high-performance, in-process, off-heap **memory cache** for Node.js written from scratch in **Rust** using **NAPI-RS**. It is designed to isolate cached items outside the V8 heap, eliminating V8 Garbage Collection (GC) sweeps and event loop Stop-the-World (STW) pauses.
+
+> **Off-heap memory cache · in-memory cache · tiered L1/L2/L3 cache · W-TinyLFU / ARC / LRU · TTL · LZ4 · worker_threads shared memory · Redis**
+>
+> | Layer | Where the data lives | Role |
+> | :--- | :--- | :--- |
+> | **L1** | V8 heap (`Map`, per thread) | Hot keys, zero FFI cost; expires with L2 and is invalidated by writes from any thread |
+> | **L2** | Native Rust memory (off-heap, shared by all workers) | Main memory cache, GC-free |
+> | **L3** | Redis (optional) | Shared across processes and hosts, async (`getAsync`, `getOrSet`) |
 
 ---
 
@@ -95,7 +105,7 @@ One of OffHeap's most powerful architectural advantages is its ability to share 
 *   **The OffHeap Solution**: Because OffHeap's L2 cache is allocated in native Rust memory using thread-safe pointers (`Arc<Mutex<...>>`) in a process-wide global registry, different worker threads calling `.getCache(name)` on their own `CacheManager` instances will point to the **exact same underlying memory buffer**.
 *   **Zero Serialization Overhead**: Key lookups and mutations read and write from/to the same shared native heap directly, making multi-threaded cache access virtually free of data-copying overhead.
 *   **Consistency Control**: 
-    *   **L1 Cache (Eventual Consistency)**: If L1 cache is enabled (default), each worker thread maintains a thread-local V8 Map of hot keys. This delivers maximum read throughput but may lead to temporary, eventual consistency across threads when keys are updated.
+    *   **L1 Cache (Invalidated Across Threads)**: If L1 cache is enabled (default), each worker thread maintains a thread-local V8 Map of hot keys. Every native write bumps a per-key generation counter that all threads see through shared native memory, so an L1 copy is dropped as soon as another thread changes the key.
     *   **L2-Only (Strict Consistency)**: For strict cross-thread read/write consistency, instantiate your caches with L1 disabled:
         ```javascript
         const manager = new CacheManager({

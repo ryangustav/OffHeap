@@ -39,13 +39,18 @@ const cache = manager.createCache('products', {
   },
   ttl: {
     defaultMs: 60000
+  },
+  redis: {
+    client: redisClient,             // ioredis client instance
+    keyPrefix: 'myapp:cache:',        // optional prefix, default: 'offheap:'
+    onError: (err, op, key) => {}    // optional error logging callback
   }
 });
 ```
 * **Parameters**:
   * `name` (`string`): Unique name/namespace for the cache.
   * `config` (`CacheConfig`):
-    * `shards` (`number`, *optional*): Number of internal lock shards. High concurrency workloads benefit from larger shard numbers (e.g. 16 or 32). Default: `8`.
+    * `shards` (`number`, *optional*): Number of internal lock shards. Default: 4 per CPU core rounded to a power of two (8 to 256), halved until every shard holds at least 64 entries (a 10-entry cache gets a single shard).
     * `eviction` (`object`, *optional*): Configuration for eviction and capacity limits:
       * `policy` (`"lru" | "arc" | "w-tinylfu" | "tinylfu"`): The eviction policy. `"w-tinylfu"` is the default and preferred policy name; `"tinylfu"` is accepted as an alias.
       * `capacity` (`number`): The maximum number of entries allowed in the cache. Default: `10000`.
@@ -57,9 +62,11 @@ const cache = manager.createCache('products', {
     * `l1` (`object`, *optional*): Configures the fast JS-level L1 cache layer:
       * `enabled` (`boolean`): Enable or disable the V8-heap L1 layer. Default: `true`.
       * `capacity` (`number`, *optional*): Max L1 capacity. Default: 10% of L2 capacity (capped at `10000`).
+      * `sharedInvalidation` (`boolean`, *optional*): When another thread (or another wrapper of the same cache) writes a key, drop this thread's L1 copy on the next read. Default: `true`. Falls back to eventual consistency on runtimes that forbid external ArrayBuffers (e.g. Electron's V8 sandbox).
     * `ttl` (`object`, *optional*): Configures time-to-live settings:
       * `defaultMs` (`number`, *optional*): Default expiration in milliseconds.
-      * `mode` (`"absolute" | "sliding"`, *optional*): Expiry mode. Default: `"absolute"`.
+      * `mode` (`"absolute" | "sliding"`, *optional*): Expiry mode. `"sliding"` restarts an entry's TTL window on every `get` hit (`peek`/`has` don't extend it). In sliding mode, keys with a TTL are not copied into L1, because L1 hits never reach L2 and could not extend the TTL. Default: `"absolute"`.
+      * `sweepIntervalMs` (`number`, *optional*): Runs `purgeExpired()` incrementally on this interval (1024 slots per shard per tick, timer is `unref`'d). Writes already sweep a few slots of their shard, so this is mainly for read-heavy caches. Default: off.
     * **Legacy Compatibility Options** (can be defined directly at the root config object):
       * `policy` (maps to `eviction.policy`)
       * `capacity` (maps to `eviction.capacity`)
@@ -107,6 +114,19 @@ const value = cache.get('prod_101');
   * Returns `string` if the value was stored as a string.
   * Returns `object | array | number | boolean` if the value was stored as a JSON-serializable type.
   * Returns `undefined` if the key is missing or expired.
+
+### `getAsync(key)`
+Retrieves a value from the cache asynchronously, checking L3 Redis if not found in local L1/L2.
+```javascript
+const value = await cache.getAsync('prod_101');
+```
+* **Parameters**:
+  * `key` (`string`): The lookup key.
+* **Returns**: `Promise<Buffer | string | object | number | boolean | undefined>`
+  * On a hit in L1 or L2, resolves immediately (returns synchronously as a Promise).
+  * On a local miss, queries L3 Redis for the payload and its remaining TTL (`PTTL`) in a single network round-trip.
+  * If found in L3, back-populates the local L2 and L1 layers with the remaining TTL, and resolves the value.
+  * If Redis experiences a network or connection error, the call gracefully degrades to a cache miss and returns `undefined` (calling the `onError` hook if defined), preventing crashes.
 
 ### `set(key, value, ttlMsOrOptions?)`
 Stores an entry in the cache. If the key already exists, its value is overwritten.
@@ -198,7 +218,8 @@ cache.mset({ a: 1, b: 'hello', c: Buffer.from([1, 2]) }, 60000);
 ```
 * **Parameters**:
   * `entries` (`Record<string, any>`): Object representing key-value entries to store.
-  * `ttl_ms` (`number`, *optional*): Time-to-live in milliseconds for all written entries.
+  * `ttl_ms` (`number`, *optional*): Time-to-live in milliseconds for all written entries. Defaults to `ttl.defaultMs`, like `set()`.
+* When Redis L3 is configured, entries are written through to Redis (and `mdelete` propagates deletions).
 
 ### `mdelete(keys)`
 Performs a batch delete of multiple keys in a single FFI crossing.
@@ -221,6 +242,16 @@ const product = await cache.getOrSet('prod_101', async () => {
   * `factory` (`() => any | Promise<any>`): A callback that computes the value if missing. Can return a Promise or a synchronous value.
   * `ttl_ms` (`number`, *optional*): TTL in milliseconds for the computed value.
 * **Returns**: `any` (the cached value, or the resolved promise result).
+
+### `getOrSetAsync(key, factory, ttl_ms?)`
+Same as `getOrSet`, but always returns a `Promise`, even when the value is cached or the factory is synchronous.
+* **Returns**: `Promise<any>`
+
+### `purgeExpired(maxScanPerShard?)`
+Removes expired entries that were never read again (expiration is otherwise lazy) and fires `onExpire` for each one.
+* **Parameters**:
+  * `maxScanPerShard` (`number`, *optional*): Slots inspected per shard, resuming where the previous call stopped. Default: all.
+* **Returns**: `number` (entries removed).
 
 ### `delete(key)`
 Deletes a specific key from the cache.
@@ -267,7 +298,11 @@ const telemetry = cache.stats();
 //   },
 //   l1: {
 //     size: 421,
-//     capacity: 1000
+//     capacity: 1000,
+//     hits: 98213              // reads served by L1 (not included in `hits`)
+//   },
+//   l3: {
+//     connected: true
 //   }
 // }
 ```
@@ -287,12 +322,9 @@ const telemetry = cache.stats();
     * `count` (`number`): Number of internal locks shards.
     * `details` (`object[]`): Array containing the `{ size, bytesUsed }` load of each shard.
     * `sizeStdDev` (`number`): The standard deviation of the entry counts across all shards. A high value suggests hashing imbalance or key pattern collisions.
-  * `memory` (`object`): Memory footprint metrics:
-    * `payloadBytes` (`number`): Theoretical memory allocated for key and value payloads.
-    * `processRss` (`number`): System resident set size (RSS) memory footprint of the Node.js process (useful to compare payload consumption vs native memory pool allocation/fragmentation).
-  * `l1` (`object`): JS L1 cache layer usage:
-    * `size` (`number`): Current number of items in the V8 heap L1 cache.
-    * `capacity` (`number`): Capacity limit of the L1 cache.
+  * `memory` (`object`): Payload size and process RSS memory.
+  * `l1` (`object`): L1 cache metrics (`size`, `capacity` and `hits`). L1 hits never reach L2, so they are not part of the top-level `hits`/`hitRate`. L1 copies of keys with a TTL expire at the same instant as the L2 entry.
+  * `l3` (`object | null`): L3 Redis status: `{ connected: boolean }` (or `null` if disabled).
 
 ### `monitor(callback, intervalMs?)`
 Initiates a pull-based background poller that tracks real-time statistics changes (deltas and operation rates) without blocking the hot path.
@@ -313,5 +345,8 @@ stop();
 * **Returns**: `() => void` (a disposer function to stop the background monitor timer).
 
 ### `dispose()`
-Explicitly disposes of the native sub-caches immediately, freeing all of its memory back to the OS.
+Explicitly disposes of the native sub-caches immediately, freeing all of its memory back to the OS. Also stops the `ttl.sweepIntervalMs` timer.
 * **Returns**: `void`
+
+## `nativeVersion`
+`require('offheap').nativeVersion` is the version of the loaded native addon (`null` for binaries older than 0.5.0). When it differs from the package version, OffHeap emits a process warning with code `OFFHEAP_NATIVE_MISMATCH`.

@@ -62,6 +62,7 @@ impl ArenaList {
     }
 
     /// Attaches a node to the tail (LRU) of this list.
+    #[allow(dead_code)] // no current policy inserts at the cold end
     pub fn attach_tail<N: HasLinks>(&mut self, nodes: &mut [N], idx: usize) {
         nodes[idx].set_prev(self.tail);
         nodes[idx].set_next(None);
@@ -77,6 +78,7 @@ impl ArenaList {
     }
 
     /// Detaches and returns the tail node (LRU), if any.
+    #[allow(dead_code)] // policies evict through their own removal paths
     pub fn pop_tail<N: HasLinks>(&mut self, nodes: &mut [N]) -> Option<usize> {
         let tail_idx = self.tail?;
         self.detach(nodes, tail_idx);

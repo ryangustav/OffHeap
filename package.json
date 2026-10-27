@@ -1,7 +1,58 @@
 {
   "name": "offheap",
-  "version": "0.4.1",
-  "description": "High-performance off-heap caching framework for Node.js written in Rust",
+  "version": "0.5.0",
+  "description": "High-performance off-heap in-memory cache for Node.js, written in Rust (NAPI-RS): GC-free memory cache with L1/L2/L3 tiers, W-TinyLFU/ARC/LRU eviction, TTL, LZ4 compression, worker_threads shared memory and Redis",
+  "keywords": [
+    "offheap",
+    "off-heap",
+    "off-heap-cache",
+    "off-heap-memory",
+    "offheap-cache",
+    "cache",
+    "caching",
+    "memory-cache",
+    "memory",
+    "in-memory",
+    "in-memory-cache",
+    "cache-memory",
+    "native-memory",
+    "memcache",
+    "tiered-cache",
+    "layered-cache",
+    "multi-level-cache",
+    "l1-cache",
+    "l2-cache",
+    "near-cache",
+    "lru-cache",
+    "lru",
+    "lfu",
+    "tinylfu",
+    "w-tinylfu",
+    "arc-cache",
+    "eviction",
+    "ttl",
+    "expiration",
+    "memoize",
+    "single-flight",
+    "rust",
+    "napi",
+    "napi-rs",
+    "native-addon",
+    "nodejs",
+    "performance",
+    "high-performance",
+    "low-latency",
+    "garbage-collection",
+    "gc",
+    "gc-free",
+    "v8",
+    "shared-memory",
+    "worker-threads",
+    "redis",
+    "redis-cache",
+    "lz4",
+    "compression"
+  ],
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
@@ -31,9 +82,10 @@
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
     "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
     "postinstall": "node scripts/postinstall.js",
-    "test": "node --test tests/index.test.js",
+    "test": "node --test tests/index.test.js tests/l1_ttl.test.js tests/l2_bypass.test.js tests/redis.test.js tests/architecture.test.js",
     "benchmark": "node --expose-gc benchmarks/js_bench.js",
     "benchmark:redis": "node --expose-gc benchmarks/redis_bench.js",
+    "benchmark:redis-layered": "node --expose-gc benchmarks/redis_layered_bench.js",
     "benchmark:all": "node --expose-gc benchmarks/js_bench.js && node --expose-gc benchmarks/redis_bench.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
@@ -41,9 +93,18 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4",
+    "ioredis-mock": "^8.13.1",
     "lru-cache": "^11.5.2",
     "tinybench": "^2.9.0",
     "vitepress": "^1.0.2"
+  },
+  "peerDependencies": {
+    "ioredis": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">= 18"
@@ -53,13 +114,17 @@
     "type": "git",
     "url": "git+https://github.com/ryangustav/OffHeap.git"
   },
+  "homepage": "https://github.com/ryangustav/OffHeap#readme",
+  "bugs": {
+    "url": "https://github.com/ryangustav/OffHeap/issues"
+  },
   "optionalDependencies": {
-    "@onlykgzin/offheap-win32-x64-msvc": "0.4.1",
-    "@onlykgzin/offheap-darwin-x64": "0.4.1",
-    "@onlykgzin/offheap-linux-x64-gnu": "0.4.1",
-    "@onlykgzin/offheap-linux-x64-musl": "0.4.1",
-    "@onlykgzin/offheap-darwin-arm64": "0.4.1",
-    "@onlykgzin/offheap-linux-arm64-musl": "0.4.1",
-    "@onlykgzin/offheap-linux-arm64-gnu": "0.4.1"
+    "@onlykgzin/offheap-darwin-arm64": "0.5.0",
+    "@onlykgzin/offheap-darwin-x64": "0.5.0",
+    "@onlykgzin/offheap-linux-arm64-gnu": "0.5.0",
+    "@onlykgzin/offheap-linux-arm64-musl": "0.5.0",
+    "@onlykgzin/offheap-linux-x64-gnu": "0.5.0",
+    "@onlykgzin/offheap-linux-x64-musl": "0.5.0",
+    "@onlykgzin/offheap-win32-x64-msvc": "0.5.0"
   }
 }
