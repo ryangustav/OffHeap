@@ -975,7 +975,8 @@ test('Observability - Shard Imbalance & Memory RSS', () => {
   // Memory validation
   assert.strictEqual(st.memory.payloadBytes, st.bytesUsed);
   assert.strictEqual(typeof st.memory.processRss, 'number');
-  assert.ok(st.memory.processRss > 0);
+  // QEMU user-mode emulation (arm64 CI) reports an RSS of 0 through process.memoryUsage().
+  assert.ok(st.memory.processRss > 0 || process.env.OFFHEAP_EMULATED_CPU);
 
   // Assert sum of size of shards is equal to total size
   const sumSize = st.shards.details.reduce((a, b) => a + b.size, 0);

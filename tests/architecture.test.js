@@ -52,8 +52,12 @@ test('Expiration - purgeExpired removes never-read entries and fires onExpire', 
   cache.set('keep', 'x');
   await sleep(20);
 
-  assert.strictEqual(cache.purgeExpired(), 50);
+  // On a slow runner the first entries can expire while the loop is still writing; the
+  // per-write sweep then removes some of them, so only the total is deterministic.
+  const purged = cache.purgeExpired();
+  assert.ok(purged > 0 && purged <= 50, `purged ${purged}`);
   assert.strictEqual(expired.length, 50);
+  assert.strictEqual(cache.stats().expirations, 50);
   assert.strictEqual(cache.stats().size, 1);
   assert.strictEqual(cache.get('keep'), 'x');
   manager.deleteCache('purge');
