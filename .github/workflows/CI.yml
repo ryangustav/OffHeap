@@ -168,7 +168,12 @@ jobs:
           # OFFHEAP_EMULATED_CPU skips throughput assertions that QEMU cannot meet.
           docker run --rm --platform linux/${{ matrix.settings.architecture == 'arm64' && 'arm64' || 'amd64' }} \
             -e OFFHEAP_EMULATED_CPU=${{ matrix.settings.architecture == 'arm64' && '1' || '' }} \
-            -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} npm test
+            -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} \
+            sh -c 'npm test > test-output.txt 2>&1; code=$?; cat test-output.txt; exit $code'
+
+      - name: Annotate failed tests
+        if: failure() && matrix.settings.docker-test-image
+        run: node scripts/ci-annotate-test-failures.js test-output.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
