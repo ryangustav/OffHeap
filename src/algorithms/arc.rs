@@ -1,8 +1,9 @@
-use bytes::Bytes;
+use super::linked_list::{ArenaList, HasLinks};
 use super::{now_ms, CacheEntry, CacheImpl, CacheStats, Eviction, IndexedNode, KeyIndex};
+use bytes::Bytes;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-enum ArcList {
+enum ArcListType {
     T1,
     B1,
     T2,
@@ -13,10 +14,25 @@ struct ArcNode {
     key: Box<str>,
     hash: u64,
     value: Option<CacheEntry>, // Only T1 and T2 store values. B1 and B2 are ghost entries.
-    list: ArcList,
+    list: ArcListType,
     prev: Option<usize>,
     next: Option<usize>,
     live: bool,
+}
+
+impl HasLinks for ArcNode {
+    fn prev(&self) -> Option<usize> {
+        self.prev
+    }
+    fn next(&self) -> Option<usize> {
+        self.next
+    }
+    fn set_prev(&mut self, v: Option<usize>) {
+        self.prev = v;
+    }
+    fn set_next(&mut self, v: Option<usize>) {
+        self.next = v;
+    }
 }
 
 impl IndexedNode for ArcNode {
@@ -30,22 +46,6 @@ impl IndexedNode for ArcNode {
     }
 }
 
-struct ArcListMetadata {
-    head: Option<usize>,
-    tail: Option<usize>,
-    len: usize,
-}
-
-impl ArcListMetadata {
-    fn new() -> Self {
-        Self {
-            head: None,
-            tail: None,
-            len: 0,
-        }
-    }
-}
-
 pub struct ArcCache {
     capacity: usize,
     max_bytes: Option<usize>,
@@ -55,12 +55,12 @@ pub struct ArcCache {
     nodes: Vec<ArcNode>,
     free_nodes: Vec<usize>,
 
-    t1: ArcListMetadata,
-    b1: ArcListMetadata,
-    t2: ArcListMetadata,
-    b2: ArcListMetadata,
+    t1: ArenaList,
+    b1: ArenaList,
+    t2: ArenaList,
+    b2: ArenaList,
 
-    p: usize, // Target size for T1
+    t1_target: usize, // Target size for T1 (the ARC adaptation parameter)
     sweep_cursor: usize,
     hits: u64,
     misses: u64,
@@ -86,11 +86,11 @@ impl ArcCache {
             index: KeyIndex::with_capacity(capacity * 2),
             nodes: Vec::with_capacity(capacity * 2),
             free_nodes: Vec::new(),
-            t1: ArcListMetadata::new(),
-            b1: ArcListMetadata::new(),
-            t2: ArcListMetadata::new(),
-            b2: ArcListMetadata::new(),
-            p: 0,
+            t1: ArenaList::new(),
+            b1: ArenaList::new(),
+            t2: ArenaList::new(),
+            b2: ArenaList::new(),
+            t1_target: 0,
             sweep_cursor: 0,
             hits: 0,
             misses: 0,
@@ -109,58 +109,31 @@ impl ArcCache {
     }
 
     fn is_resident_expired(&self, idx: usize) -> bool {
-        self.nodes[idx].value.as_ref().map_or(true, |e| e.is_expired())
+        self.nodes[idx]
+            .value
+            .as_ref()
+            .is_none_or(|e| e.is_expired())
     }
 
     fn detach(&mut self, idx: usize) {
-        let prev = self.nodes[idx].prev;
-        let next = self.nodes[idx].next;
-        let list = self.nodes[idx].list;
-
-        let meta = match list {
-            ArcList::T1 => &mut self.t1,
-            ArcList::B1 => &mut self.b1,
-            ArcList::T2 => &mut self.t2,
-            ArcList::B2 => &mut self.b2,
-        };
-
-        if let Some(p) = prev {
-            self.nodes[p].next = next;
-        } else {
-            meta.head = next;
+        let nodes = &mut self.nodes;
+        match nodes[idx].list {
+            ArcListType::T1 => self.t1.detach(nodes, idx),
+            ArcListType::B1 => self.b1.detach(nodes, idx),
+            ArcListType::T2 => self.t2.detach(nodes, idx),
+            ArcListType::B2 => self.b2.detach(nodes, idx),
         }
-
-        if let Some(n) = next {
-            self.nodes[n].prev = prev;
-        } else {
-            meta.tail = prev;
-        }
-
-        meta.len -= 1;
-        self.nodes[idx].prev = None;
-        self.nodes[idx].next = None;
     }
 
-    fn attach_to_head(&mut self, idx: usize, list: ArcList) {
-        self.nodes[idx].list = list;
-        let meta = match list {
-            ArcList::T1 => &mut self.t1,
-            ArcList::B1 => &mut self.b1,
-            ArcList::T2 => &mut self.t2,
-            ArcList::B2 => &mut self.b2,
-        };
-
-        self.nodes[idx].prev = None;
-        self.nodes[idx].next = meta.head;
-
-        if let Some(h) = meta.head {
-            self.nodes[h].prev = Some(idx);
-        } else {
-            meta.tail = Some(idx);
+    fn attach_to_head(&mut self, idx: usize, list: ArcListType) {
+        let nodes = &mut self.nodes;
+        nodes[idx].list = list;
+        match list {
+            ArcListType::T1 => self.t1.attach_head(nodes, idx),
+            ArcListType::B1 => self.b1.attach_head(nodes, idx),
+            ArcListType::T2 => self.t2.attach_head(nodes, idx),
+            ArcListType::B2 => self.b2.attach_head(nodes, idx),
         }
-
-        meta.head = Some(idx);
-        meta.len += 1;
     }
 
     /// Unlinks a node (resident or ghost) from its list and the index and frees its slot.
@@ -184,10 +157,12 @@ impl ArcCache {
     }
 
     fn replace(&mut self, key_in_b2: bool) -> Option<Eviction> {
-        let (tail, ghost_list) = if self.t1.len > 0 && (self.t1.len > self.p || (key_in_b2 && self.t1.len == self.p)) {
-            (self.t1.tail, ArcList::B1)
+        let (tail, ghost_list) = if self.t1.len > 0
+            && (self.t1.len > self.t1_target || (key_in_b2 && self.t1.len == self.t1_target))
+        {
+            (self.t1.tail, ArcListType::B1)
         } else {
-            (self.t2.tail, ArcList::B2)
+            (self.t2.tail, ArcListType::B2)
         };
         let idx = tail?;
         let bytes = self.node_bytes(idx);
@@ -206,23 +181,26 @@ impl CacheImpl for ArcCache {
     fn get(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>) {
         if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             match self.nodes[idx].list {
-                ArcList::T1 | ArcList::T2 => {
+                ArcListType::T1 | ArcListType::T2 => {
                     if self.is_resident_expired(idx) {
                         self.misses += 1;
                         (None, Some(self.expire_node(idx)))
                     } else {
                         self.detach(idx);
-                        self.attach_to_head(idx, ArcList::T2);
+                        self.attach_to_head(idx, ArcListType::T2);
                         self.hits += 1;
                         if self.sliding {
                             if let Some(e) = self.nodes[idx].value.as_mut() {
                                 e.slide();
                             }
                         }
-                        (self.nodes[idx].value.as_ref().map(|e| e.value.clone()), None)
+                        (
+                            self.nodes[idx].value.as_ref().map(|e| e.value.clone()),
+                            None,
+                        )
                     }
                 }
-                ArcList::B1 | ArcList::B2 => {
+                ArcListType::B1 | ArcListType::B2 => {
                     self.misses += 1;
                     (None, None)
                 }
@@ -236,13 +214,16 @@ impl CacheImpl for ArcCache {
     fn peek(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>) {
         if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             match self.nodes[idx].list {
-                ArcList::T1 | ArcList::T2 => {
+                ArcListType::T1 | ArcListType::T2 => {
                     if self.is_resident_expired(idx) {
                         self.misses += 1;
                         (None, Some(self.expire_node(idx)))
                     } else {
                         self.hits += 1;
-                        (self.nodes[idx].value.as_ref().map(|e| e.value.clone()), None)
+                        (
+                            self.nodes[idx].value.as_ref().map(|e| e.value.clone()),
+                            None,
+                        )
                     }
                 }
                 _ => {
@@ -259,21 +240,27 @@ impl CacheImpl for ArcCache {
     fn has(&mut self, hash: u64, key: &str) -> (bool, Option<Eviction>) {
         if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             match self.nodes[idx].list {
-                ArcList::T1 | ArcList::T2 => {
+                ArcListType::T1 | ArcListType::T2 => {
                     if self.is_resident_expired(idx) {
                         (false, Some(self.expire_node(idx)))
                     } else {
                         (true, None)
                     }
                 }
-                _ => (false, None)
+                _ => (false, None),
             }
         } else {
             (false, None)
         }
     }
 
-    fn set(&mut self, hash: u64, key: &str, value: Bytes, ttl_ms: Option<u64>) -> (Option<Bytes>, Option<Vec<Eviction>>) {
+    fn set(
+        &mut self,
+        hash: u64,
+        key: &str,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+    ) -> (Option<Bytes>, Option<Vec<Eviction>>) {
         if self.capacity == 0 {
             return (None, None);
         }
@@ -286,23 +273,26 @@ impl CacheImpl for ArcCache {
 
         if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             match self.nodes[idx].list {
-                ArcList::T1 | ArcList::T2 => {
+                ArcListType::T1 | ArcListType::T2 => {
                     if self.is_resident_expired(idx) {
                         let ev = self.expire_node(idx);
                         evictions.get_or_insert_with(Vec::new).push(ev);
                     } else {
                         let old_bytes = self.node_bytes(idx);
-                        old_value = self.nodes[idx].value.replace(new_entry.clone()).map(|e| e.value);
+                        old_value = self.nodes[idx]
+                            .value
+                            .replace(new_entry.clone())
+                            .map(|e| e.value);
                         self.bytes_used = self.bytes_used + new_bytes - old_bytes;
                         self.detach(idx);
-                        self.attach_to_head(idx, ArcList::T2);
+                        self.attach_to_head(idx, ArcListType::T2);
                         stored = true;
                     }
                 }
-                ArcList::B1 => {
+                ArcListType::B1 => {
                     let b1_len = if self.b1.len == 0 { 1 } else { self.b1.len };
                     let delta = std::cmp::max(1, self.b2.len / b1_len);
-                    self.p = std::cmp::min(self.p + delta, self.capacity);
+                    self.t1_target = std::cmp::min(self.t1_target + delta, self.capacity);
 
                     if let Some(ev) = self.replace(false) {
                         evictions.get_or_insert_with(Vec::new).push(ev);
@@ -311,13 +301,13 @@ impl CacheImpl for ArcCache {
                     self.detach(idx);
                     self.nodes[idx].value = Some(new_entry.clone());
                     self.bytes_used += new_bytes;
-                    self.attach_to_head(idx, ArcList::T2);
+                    self.attach_to_head(idx, ArcListType::T2);
                     stored = true;
                 }
-                ArcList::B2 => {
+                ArcListType::B2 => {
                     let b2_len = if self.b2.len == 0 { 1 } else { self.b2.len };
                     let delta = std::cmp::max(1, self.b1.len / b2_len);
-                    self.p = self.p.saturating_sub(delta);
+                    self.t1_target = self.t1_target.saturating_sub(delta);
 
                     if let Some(ev) = self.replace(true) {
                         evictions.get_or_insert_with(Vec::new).push(ev);
@@ -326,7 +316,7 @@ impl CacheImpl for ArcCache {
                     self.detach(idx);
                     self.nodes[idx].value = Some(new_entry.clone());
                     self.bytes_used += new_bytes;
-                    self.attach_to_head(idx, ArcList::T2);
+                    self.attach_to_head(idx, ArcListType::T2);
                     stored = true;
                 }
             }
@@ -348,7 +338,9 @@ impl CacheImpl for ArcCache {
                     let (ev_key, entry) = self.remove_completely(t1_tail);
                     if let Some(e) = entry {
                         self.evictions += 1;
-                        evictions.get_or_insert_with(Vec::new).push(Eviction::evicted(ev_key, e.value));
+                        evictions
+                            .get_or_insert_with(Vec::new)
+                            .push(Eviction::evicted(ev_key, e.value));
                     }
                 }
             } else if l1_len < self.capacity && l1_len + l2_len >= self.capacity {
@@ -366,7 +358,7 @@ impl CacheImpl for ArcCache {
                 key: key.into(),
                 hash,
                 value: Some(new_entry),
-                list: ArcList::T1,
+                list: ArcListType::T1,
                 prev: None,
                 next: None,
                 live: true,
@@ -380,7 +372,7 @@ impl CacheImpl for ArcCache {
             };
 
             self.bytes_used += new_bytes;
-            self.attach_to_head(idx, ArcList::T1);
+            self.attach_to_head(idx, ArcListType::T1);
             self.index.insert(&self.nodes, hash, idx);
         }
 
@@ -398,18 +390,18 @@ impl CacheImpl for ArcCache {
     fn touch(&mut self, hash: u64, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>) {
         if let Some(idx) = self.index.find(&self.nodes, hash, key) {
             match self.nodes[idx].list {
-                ArcList::T1 | ArcList::T2 => {
+                ArcListType::T1 | ArcListType::T2 => {
                     if self.is_resident_expired(idx) {
                         (false, Some(self.expire_node(idx)))
                     } else {
                         let refreshed = self.nodes[idx].value.as_ref().map(|e| e.with_ttl(ttl_ms));
                         self.nodes[idx].value = refreshed;
                         self.detach(idx);
-                        self.attach_to_head(idx, ArcList::T2);
+                        self.attach_to_head(idx, ArcListType::T2);
                         (true, None)
                     }
                 }
-                _ => (false, None)
+                _ => (false, None),
             }
         } else {
             (false, None)
@@ -429,11 +421,11 @@ impl CacheImpl for ArcCache {
         self.index.clear();
         self.nodes.clear();
         self.free_nodes.clear();
-        self.t1 = ArcListMetadata::new();
-        self.b1 = ArcListMetadata::new();
-        self.t2 = ArcListMetadata::new();
-        self.b2 = ArcListMetadata::new();
-        self.p = 0;
+        self.t1 = ArenaList::new();
+        self.b1 = ArenaList::new();
+        self.t2 = ArenaList::new();
+        self.b2 = ArenaList::new();
+        self.t1_target = 0;
         self.sweep_cursor = 0;
         self.hits = 0;
         self.misses = 0;
@@ -457,7 +449,10 @@ impl CacheImpl for ArcCache {
     fn ttl_remaining_ms(&self, hash: u64, key: &str) -> Option<u64> {
         let idx = self.index.find(&self.nodes, hash, key)?;
         match self.nodes[idx].list {
-            ArcList::T1 | ArcList::T2 => self.nodes[idx].value.as_ref().and_then(|e| e.remaining_ms()),
+            ArcListType::T1 | ArcListType::T2 => self.nodes[idx]
+                .value
+                .as_ref()
+                .and_then(|e| e.remaining_ms()),
             _ => None,
         }
     }
@@ -472,7 +467,7 @@ impl CacheImpl for ArcCache {
             let idx = self.sweep_cursor % len;
             self.sweep_cursor = idx + 1;
             let node = &self.nodes[idx];
-            let expired = node.live && node.value.as_ref().map_or(false, |e| e.is_expired_at(now));
+            let expired = node.live && node.value.as_ref().is_some_and(|e| e.is_expired_at(now));
             if expired {
                 let ev = self.expire_node(idx);
                 out.push(ev);
@@ -486,7 +481,7 @@ impl CacheImpl for ArcCache {
             let mut curr = head;
             while let Some(idx) = curr {
                 let node = &self.nodes[idx];
-                let expired = node.value.as_ref().map_or(true, |e| e.is_expired());
+                let expired = node.value.as_ref().is_none_or(|e| e.is_expired());
                 if !expired {
                     result.push(node.key.to_string());
                 }
@@ -497,11 +492,10 @@ impl CacheImpl for ArcCache {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_hash as h;
+    use super::*;
 
     fn set(cache: &mut ArcCache, key: &str, value: u8, ttl: Option<u64>) {
         cache.set(h(key), key, Bytes::from(vec![value]), ttl);

@@ -1,5 +1,6 @@
-use bytes::Bytes;
+use super::linked_list::{ArenaList, HasLinks};
 use super::{now_ms, CacheEntry, CacheImpl, CacheStats, Eviction, IndexedNode, KeyIndex};
+use bytes::Bytes;
 
 struct LruNode {
     key: Box<str>,
@@ -8,6 +9,21 @@ struct LruNode {
     prev: Option<usize>,
     next: Option<usize>,
     live: bool,
+}
+
+impl HasLinks for LruNode {
+    fn prev(&self) -> Option<usize> {
+        self.prev
+    }
+    fn next(&self) -> Option<usize> {
+        self.next
+    }
+    fn set_prev(&mut self, v: Option<usize>) {
+        self.prev = v;
+    }
+    fn set_next(&mut self, v: Option<usize>) {
+        self.next = v;
+    }
 }
 
 impl IndexedNode for LruNode {
@@ -29,8 +45,7 @@ pub struct LruCache {
     index: KeyIndex,
     nodes: Vec<LruNode>,
     free_nodes: Vec<usize>,
-    head: Option<usize>, // Most Recently Used
-    tail: Option<usize>, // Least Recently Used
+    list: ArenaList, // head = most recently used, tail = least recently used
     sweep_cursor: usize,
     hits: u64,
     misses: u64,
@@ -56,8 +71,7 @@ impl LruCache {
             index: KeyIndex::with_capacity(capacity.min(1024)),
             nodes: Vec::with_capacity(capacity.min(1024)),
             free_nodes: Vec::new(),
-            head: None,
-            tail: None,
+            list: ArenaList::new(),
             sweep_cursor: 0,
             hits: 0,
             misses: 0,
@@ -66,50 +80,17 @@ impl LruCache {
         }
     }
 
-    fn detach(&mut self, node_idx: usize) {
-        let prev = self.nodes[node_idx].prev;
-        let next = self.nodes[node_idx].next;
-
-        if let Some(p) = prev {
-            self.nodes[p].next = next;
-        } else {
-            self.head = next;
-        }
-
-        if let Some(n) = next {
-            self.nodes[n].prev = prev;
-        } else {
-            self.tail = prev;
-        }
-
-        self.nodes[node_idx].prev = None;
-        self.nodes[node_idx].next = None;
-    }
-
-    fn attach_to_head(&mut self, node_idx: usize) {
-        self.nodes[node_idx].prev = None;
-        self.nodes[node_idx].next = self.head;
-
-        if let Some(h) = self.head {
-            self.nodes[h].prev = Some(node_idx);
-        } else {
-            self.tail = Some(node_idx);
-        }
-
-        self.head = Some(node_idx);
-    }
-
     fn move_to_head(&mut self, node_idx: usize) {
-        if self.head == Some(node_idx) {
+        if self.list.head == Some(node_idx) {
             return;
         }
-        self.detach(node_idx);
-        self.attach_to_head(node_idx);
+        self.list.detach(&mut self.nodes, node_idx);
+        self.list.attach_head(&mut self.nodes, node_idx);
     }
 
     /// Unlinks a node from the list and the index, releases its slot and its bytes.
     fn remove_node(&mut self, node_idx: usize) -> (String, CacheEntry) {
-        self.detach(node_idx);
+        self.list.detach(&mut self.nodes, node_idx);
         self.index.remove(self.nodes[node_idx].hash, node_idx);
         self.free_nodes.push(node_idx);
         let node = &mut self.nodes[node_idx];
@@ -127,7 +108,7 @@ impl LruCache {
     }
 
     fn evict_tail(&mut self) -> Option<Eviction> {
-        let t_idx = self.tail?;
+        let t_idx = self.list.tail?;
         let (key, entry) = self.remove_node(t_idx);
         self.evictions += 1;
         Some(Eviction::evicted(key, entry.value))
@@ -135,7 +116,14 @@ impl LruCache {
 
     fn insert_new(&mut self, hash: u64, key: &str, entry: CacheEntry) {
         self.bytes_used += key.len() + entry.value.len();
-        let node = LruNode { key: key.into(), hash, entry, prev: None, next: None, live: true };
+        let node = LruNode {
+            key: key.into(),
+            hash,
+            entry,
+            prev: None,
+            next: None,
+            live: true,
+        };
         let idx = if let Some(idx) = self.free_nodes.pop() {
             self.nodes[idx] = node;
             idx
@@ -143,7 +131,7 @@ impl LruCache {
             self.nodes.push(node);
             self.nodes.len() - 1
         };
-        self.attach_to_head(idx);
+        self.list.attach_head(&mut self.nodes, idx);
         self.index.insert(&self.nodes, hash, idx);
     }
 }
@@ -195,7 +183,13 @@ impl CacheImpl for LruCache {
         }
     }
 
-    fn set(&mut self, hash: u64, key: &str, value: Bytes, ttl_ms: Option<u64>) -> (Option<Bytes>, Option<Vec<Eviction>>) {
+    fn set(
+        &mut self,
+        hash: u64,
+        key: &str,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+    ) -> (Option<Bytes>, Option<Vec<Eviction>>) {
         let new_entry = CacheEntry::new(value, ttl_ms);
         let mut old_value = None;
         let mut evictions: Option<Vec<Eviction>> = None;
@@ -262,8 +256,7 @@ impl CacheImpl for LruCache {
         self.index.clear();
         self.nodes.clear();
         self.free_nodes.clear();
-        self.head = None;
-        self.tail = None;
+        self.list = ArenaList::new();
         self.sweep_cursor = 0;
         self.hits = 0;
         self.misses = 0;
@@ -309,7 +302,7 @@ impl CacheImpl for LruCache {
 
     fn keys(&self) -> Vec<String> {
         let mut result = Vec::new();
-        let mut curr = self.head;
+        let mut curr = self.list.head;
         while let Some(idx) = curr {
             let node = &self.nodes[idx];
             if !node.entry.is_expired() {
@@ -323,8 +316,8 @@ impl CacheImpl for LruCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_hash as h;
+    use super::*;
 
     fn set(cache: &mut LruCache, key: &str, value: u8, ttl: Option<u64>) {
         cache.set(h(key), key, Bytes::from(vec![value]), ttl);
@@ -366,7 +359,10 @@ mod tests {
             }
         }
         assert_eq!(cache.stats().size, cache.keys().len());
-        assert_eq!(cache.bytes_used, cache.keys().iter().map(|k| k.len() + 1).sum::<usize>());
+        assert_eq!(
+            cache.bytes_used,
+            cache.keys().iter().map(|k| k.len() + 1).sum::<usize>()
+        );
     }
 
     #[test]

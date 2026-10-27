@@ -1,14 +1,19 @@
+use super::cache::{Cache, CacheConfig};
+use napi::{Error, Result, Status};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use napi::{Result, Error, Status};
-use super::cache::{Cache, CacheConfig};
 
-static GLOBAL_CACHES: LazyLock<parking_lot::RwLock<HashMap<String, Cache>>> = LazyLock::new(|| {
-    parking_lot::RwLock::new(HashMap::new())
-});
+static GLOBAL_CACHES: LazyLock<parking_lot::RwLock<HashMap<String, Cache>>> =
+    LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
 
 #[napi]
 pub struct CacheManager;
+
+impl Default for CacheManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[napi]
 impl CacheManager {

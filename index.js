@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const binding = require('./binding');
 const { version: PACKAGE_VERSION } = require('./package.json');
 
@@ -15,13 +16,13 @@ if (NATIVE_VERSION !== PACKAGE_VERSION) {
 
 const activePromises = new Map();
 
-// Must match L1_GEN_SLOTS in src/cache.rs.
+// Must match L1_GEN_SLOTS in src/cache/types.rs.
 const L1_GEN_SLOTS = 4096;
 
 // Slab slots inspected per shard on each ttl.sweepIntervalMs tick.
 const SWEEP_SLOTS_PER_TICK = 1024;
 
-// FNV-1a over UTF-16 code units: the same slot as l1_slot() in src/cache.rs.
+// FNV-1a over UTF-16 code units: the same slot as l1_slot() in src/cache/types.rs.
 function l1Slot(key) {
   let h = 0x811c9dc5 | 0;
   for (let i = 0; i < key.length; i++) {
@@ -41,6 +42,9 @@ class L1Entry {
   }
 }
 
+// Objects, arrays and booleans are serialized as JSON with a 2-byte sentinel prefix "\0J".
+// This signals the Rust layer to store them as Tag 3 (JSON) or Tag 5 (LZ4-JSON).
+// Numbers, Buffers and plain strings pass through without wrapping.
 function wrapValue(val) {
   if (typeof val === 'string') {
     // "\0J" marks JSON on the native side, so strings starting with "\0" travel JSON-encoded
@@ -190,7 +194,8 @@ const DEFAULT_CONFIG = {
   }
 };
 
-function mergeConfigs(parent, child) {
+function mergeConfigs(parent, child, _depth = 0) {
+  if (_depth > 5) return child; // safety guard against accidental circular references
   const result = { ...parent };
   for (const k in child) {
     if (k === 'redis') {
@@ -198,7 +203,7 @@ function mergeConfigs(parent, child) {
       continue;
     }
     if (child[k] && typeof child[k] === 'object' && !Array.isArray(child[k])) {
-      result[k] = mergeConfigs(parent[k] || {}, child[k]);
+      result[k] = mergeConfigs(parent[k] || {}, child[k], _depth + 1);
     } else if (child[k] !== undefined) {
       result[k] = child[k];
     }
@@ -274,7 +279,7 @@ function validateKey(key) {
 class Cache {
   constructor(nativeCache, config = {}, redis = null) {
     this._native = nativeCache;
-    this._id = Math.random().toString(36).substring(2);
+    this._id = randomUUID();
     this._config = config;
     this._redis = redis;
     
@@ -1099,6 +1104,9 @@ class CacheManager {
       compression: merged.compression.enabled,
       slidingTtl: ttlMode === 'sliding',
     };
+    if (!rawConfig.capacity || rawConfig.capacity <= 0) {
+      throw new RangeError(`Cache '${name}' capacity must be a positive integer, got: ${rawConfig.capacity}`);
+    }
     const nativeCache = this._native.createCache(name, rawConfig);
 
     let redisL3 = null;

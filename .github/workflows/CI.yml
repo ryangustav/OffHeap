@@ -24,6 +24,30 @@ jobs:
       - name: Run NPM Audit
         run: npm audit --omit=dev
 
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: lint-cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Format Check
+        run: cargo fmt --check
+
   rust-tests:
     name: Rust unit tests (${{ matrix.os }})
     strategy:
@@ -40,6 +64,7 @@ jobs:
 
   build:
     name: Build
+    needs: [audit, lint, rust-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -140,7 +165,10 @@ jobs:
       - name: Run tests in Docker
         if: matrix.settings.docker-test-image
         run: |
-          docker run --rm --platform linux/${{ matrix.settings.architecture == 'arm64' && 'arm64' || 'amd64' }}             -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} npm test
+          # OFFHEAP_EMULATED_CPU skips throughput assertions that QEMU cannot meet.
+          docker run --rm --platform linux/${{ matrix.settings.architecture == 'arm64' && 'arm64' || 'amd64' }} \
+            -e OFFHEAP_EMULATED_CPU=${{ matrix.settings.architecture == 'arm64' && '1' || '' }} \
+            -v "$PWD:/app" -w /app ${{ matrix.settings.docker-test-image }} npm test
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

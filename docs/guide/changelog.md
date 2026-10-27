@@ -24,6 +24,9 @@ All notable changes to the OffHeap project are documented here.
 * **Native storage**: one seeded `foldhash` hash per operation shared by shard routing, the `hashbrown` index and the TinyLFU sketch; keys stored once; values held as `Bytes` so reads no longer copy the payload inside the lock. Measured locally: ~18% faster `set`, ~20% faster `get`, ~15% lower RSS for 300k string entries.
 * **Default shard count**: 4 per CPU (power of two, 8-256), reduced so every shard holds at least 64 entries (previously a fixed 8, which split small caches into near-empty shards and over-allocated their capacity).
 * **Key validation**: keys up to 2730 UTF-16 code units skip the UTF-8 byte count.
+* **Code layout**: native cache split into `src/cache/{mod,types,serde}.rs`; LRU and ARC share the `ArenaList` intrusive list. Integer counters are stored little-endian on every platform.
+* **CI**: new lint job (`clippy -D warnings`, `rustfmt --check`) and Rust unit tests on Linux/Windows/macOS gate the builds; musl and arm64 binaries run the full test suite in Docker.
+* **Config**: `createCache` rejects a non-positive capacity with a `RangeError`.
 
 ### Fixed
 * **Strings starting with `"\0J"` were decoded as JSON**: `set('k', '\0J{"admin":true}')` read back as an object (and malformed ones threw). Strings starting with `"\0"` are now stored JSON-encoded; existing data is unaffected.

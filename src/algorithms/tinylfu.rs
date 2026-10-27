@@ -1,8 +1,14 @@
-use bytes::Bytes;
 use super::{now_ms, CacheEntry, CacheImpl, CacheStats, Eviction, IndexedNode, KeyIndex};
+use bytes::Bytes;
 
-// Count-Min Sketch with 4-bit counters and aging.
-// Sized dynamically relative to cache capacity.
+/// Count-Min Sketch with 4-bit saturating counters and periodic halving (aging).
+///
+/// This approximates access frequency for the W-TinyLFU admission policy.
+/// Complexity guarantees:
+/// - **Space**: `O(capacity × 4)` bits, packed into `capacity × 2` bytes
+/// - **Estimate**: minimum of 4 independent hash probes (bounded error, high probability)
+/// - **Aging**: all counters are halved every `capacity × 10` additions to prevent
+///   stale frequency data from blocking new entrants indefinitely
 struct FrequencySketch {
     table: Vec<u8>,
     mask: usize,
@@ -20,7 +26,6 @@ fn sketch_hash(hash: u64) -> u64 {
 
 impl FrequencySketch {
     fn new(capacity: usize) -> Self {
-        // Number of counters: next power of 2 of capacity * 4, min 128
         let counters = (capacity * 4).next_power_of_two().max(128);
         let bytes = counters / 2;
         Self {
@@ -381,7 +386,13 @@ impl CacheImpl for TinyLfuCache {
         }
     }
 
-    fn set(&mut self, hash: u64, key: &str, value: Bytes, ttl_ms: Option<u64>) -> (Option<Bytes>, Option<Vec<Eviction>>) {
+    fn set(
+        &mut self,
+        hash: u64,
+        key: &str,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+    ) -> (Option<Bytes>, Option<Vec<Eviction>>) {
         self.sketch.increment(hash);
 
         let new_entry = CacheEntry::new(value, ttl_ms);
@@ -428,10 +439,11 @@ impl CacheImpl for TinyLfuCache {
                     let main_has_capacity = self.probation.capacity > 0;
                     if main_has_capacity {
                         let total_size = self.window.len + self.probation.len + self.protected.len;
-                        if total_size + 1 <= self.capacity {
+                        if total_size < self.capacity {
                             self.attach_to_head(candidate_idx, TinyLfuList::Probation);
                         } else if let Some(victim_idx) = self.probation.tail {
-                            let candidate_freq = self.sketch.estimate(self.nodes[candidate_idx].hash);
+                            let candidate_freq =
+                                self.sketch.estimate(self.nodes[candidate_idx].hash);
                             let victim_freq = self.sketch.estimate(self.nodes[victim_idx].hash);
 
                             if candidate_freq > victim_freq {
@@ -562,11 +574,10 @@ impl CacheImpl for TinyLfuCache {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_hash as h;
+    use super::*;
 
     fn set(cache: &mut TinyLfuCache, key: &str, value: u8, ttl: Option<u64>) {
         cache.set(h(key), key, Bytes::from(vec![value]), ttl);
@@ -606,7 +617,12 @@ mod tests {
         let mut cache = TinyLfuCache::new(50);
         for i in 0..2000u32 {
             let key = format!("k{}", i % 300);
-            set(&mut cache, &key, (i % 251) as u8, if i % 3 == 0 { Some(1_000) } else { None });
+            set(
+                &mut cache,
+                &key,
+                (i % 251) as u8,
+                if i % 3 == 0 { Some(1_000) } else { None },
+            );
             if i % 7 == 0 {
                 cache.delete(h(&key), &key);
             }
@@ -614,7 +630,10 @@ mod tests {
         let keys = cache.keys();
         assert_eq!(cache.stats().size, keys.len());
         assert!(keys.len() <= 50);
-        assert_eq!(cache.bytes_used, keys.iter().map(|k| k.len() + 1).sum::<usize>());
+        assert_eq!(
+            cache.bytes_used,
+            keys.iter().map(|k| k.len() + 1).sum::<usize>()
+        );
         for k in &keys {
             assert!(get(&mut cache, k).is_some());
         }
@@ -631,7 +650,9 @@ mod tests {
         let mut out = Vec::new();
         cache.purge_expired(1000, &mut out);
         assert_eq!(out.len(), 20);
-        assert!(out.iter().all(|e| e.reason == "expired" && e.key.starts_with('t')));
+        assert!(out
+            .iter()
+            .all(|e| e.reason == "expired" && e.key.starts_with('t')));
         assert_eq!(cache.stats().size, 20);
     }
 }

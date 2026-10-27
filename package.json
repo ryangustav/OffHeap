@@ -84,7 +84,9 @@
     "postinstall": "node scripts/postinstall.js",
     "test": "node --test tests/index.test.js tests/l1_ttl.test.js tests/l2_bypass.test.js tests/redis.test.js tests/architecture.test.js",
     "benchmark": "node --expose-gc benchmarks/js_bench.js",
-    "benchmark:redis": "node --expose-gc benchmarks/redis_layered_bench.js",
+    "benchmark:redis": "node --expose-gc benchmarks/redis_bench.js",
+    "benchmark:redis-layered": "node --expose-gc benchmarks/redis_layered_bench.js",
+    "benchmark:all": "node --expose-gc benchmarks/js_bench.js && node --expose-gc benchmarks/redis_bench.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

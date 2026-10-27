@@ -1,7 +1,7 @@
-use std::sync::LazyLock;
-use std::time::Instant;
 use bytes::Bytes;
 use hashbrown::HashTable;
+use std::sync::LazyLock;
+use std::time::Instant;
 
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -32,11 +32,19 @@ pub struct Eviction {
 
 impl Eviction {
     pub fn expired(key: String, value: Bytes) -> Self {
-        Self { key, value, reason: "expired" }
+        Self {
+            key,
+            value,
+            reason: "expired",
+        }
     }
 
     pub fn evicted(key: String, value: Bytes) -> Self {
-        Self { key, value, reason: "evicted" }
+        Self {
+            key,
+            value,
+            reason: "evicted",
+        }
     }
 }
 
@@ -54,8 +62,16 @@ pub struct CacheEntry {
 impl CacheEntry {
     pub fn new(value: Bytes, ttl_ms: Option<u64>) -> Self {
         match ttl_ms {
-            Some(ms) => Self { value, expires_at: now_ms().saturating_add(ms), ttl_ms: ms },
-            None => Self { value, expires_at: 0, ttl_ms: 0 },
+            Some(ms) => Self {
+                value,
+                expires_at: now_ms().saturating_add(ms),
+                ttl_ms: ms,
+            },
+            None => Self {
+                value,
+                expires_at: 0,
+                ttl_ms: 0,
+            },
         }
     }
 
@@ -105,13 +121,17 @@ pub struct KeyIndex {
 
 impl KeyIndex {
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { table: HashTable::with_capacity(capacity) }
+        Self {
+            table: HashTable::with_capacity(capacity),
+        }
     }
 
     #[inline]
     pub fn find<N: IndexedNode>(&self, nodes: &[N], hash: u64, key: &str) -> Option<usize> {
         self.table
-            .find(hash, |&idx| nodes[idx].hash() == hash && nodes[idx].key() == key)
+            .find(hash, |&idx| {
+                nodes[idx].hash() == hash && nodes[idx].key() == key
+            })
             .copied()
     }
 
@@ -149,7 +169,13 @@ pub trait CacheImpl: Send + Sync {
     fn get(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>);
     fn peek(&mut self, hash: u64, key: &str) -> (Option<Bytes>, Option<Eviction>);
     fn has(&mut self, hash: u64, key: &str) -> (bool, Option<Eviction>);
-    fn set(&mut self, hash: u64, key: &str, value: Bytes, ttl_ms: Option<u64>) -> (Option<Bytes>, Option<Vec<Eviction>>);
+    fn set(
+        &mut self,
+        hash: u64,
+        key: &str,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+    ) -> (Option<Bytes>, Option<Vec<Eviction>>);
     fn touch(&mut self, hash: u64, key: &str, ttl_ms: Option<u64>) -> (bool, Option<Eviction>);
     fn delete(&mut self, hash: u64, key: &str) -> bool;
     fn clear(&mut self);
@@ -163,8 +189,9 @@ pub trait CacheImpl: Send + Sync {
     fn purge_expired(&mut self, max_scan: usize, out: &mut Vec<Eviction>);
 }
 
-pub mod lru;
 pub mod arc;
+pub(super) mod linked_list;
+pub mod lru;
 pub mod tinylfu;
 
 #[cfg(test)]
@@ -185,14 +212,29 @@ mod model_tests {
 
     /// Invariants every policy must keep: index, lists, `size`, `bytes_used` and `keys()`
     /// agree, capacity is respected, and every resident key returns its last written value.
-    fn check_invariants(cache: &mut dyn CacheImpl, last_written: &HashMap<String, u8>, capacity: usize) {
+    fn check_invariants(
+        cache: &mut dyn CacheImpl,
+        last_written: &HashMap<String, u8>,
+        capacity: usize,
+    ) {
         let keys = cache.keys();
         let stats = cache.stats();
         assert_eq!(stats.size, keys.len());
-        assert!(stats.size <= capacity, "size {} > capacity {}", stats.size, capacity);
-        assert_eq!(stats.bytes_used, keys.iter().map(|k| k.len() + 1).sum::<usize>());
+        assert!(
+            stats.size <= capacity,
+            "size {} > capacity {}",
+            stats.size,
+            capacity
+        );
+        assert_eq!(
+            stats.bytes_used,
+            keys.iter().map(|k| k.len() + 1).sum::<usize>()
+        );
         for key in &keys {
-            let value = cache.peek(test_hash(key), key).0.expect("listed key must be readable");
+            let value = cache
+                .peek(test_hash(key), key)
+                .0
+                .expect("listed key must be readable");
             assert_eq!(value.as_ref(), &[last_written[key]]);
         }
     }
@@ -206,7 +248,11 @@ mod model_tests {
             match rng.gen_range(0..10) {
                 0..=3 => {
                     let v: u8 = rng.gen();
-                    let ttl = if rng.gen_bool(0.2) { Some(3_600_000) } else { None };
+                    let ttl = if rng.gen_bool(0.2) {
+                        Some(3_600_000)
+                    } else {
+                        None
+                    };
                     cache.set(h, &key, bytes(v), ttl);
                     last_written.insert(key, v);
                 }

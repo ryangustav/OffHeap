@@ -1,156 +1,27 @@
-use std::sync::Arc;
-use std::hash::BuildHasher;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use super::algorithms::{arc::ArcCache, lru::LruCache, tinylfu::TinyLfuCache, CacheImpl, Eviction};
 use bytes::Bytes;
-use napi::{Env, JsArrayBuffer, JsBuffer, JsString, JsObject, JsUnknown, Result, ValueType};
-use super::algorithms::{CacheImpl, Eviction, lru::LruCache, arc::ArcCache, tinylfu::TinyLfuCache};
+use napi::{Env, JsArrayBuffer, JsObject, JsUnknown, Result};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+pub mod serde;
+pub mod types;
+
+use serde::{TAG_I64, TAG_JSON};
+pub use types::*;
 
 /// Expired-entry slots inspected (per shard) after every write while TTLs are in use.
 /// Keeps memory held by never-read expired entries bounded without a background thread.
 const WRITE_SWEEP_SLOTS: usize = 4;
 
-/// Number of generation counters exposed to each JS wrapper for L1 invalidation.
-/// Must match `L1_GEN_SLOTS` in index.js.
-pub const L1_GEN_SLOTS: usize = 4096;
-
-/// Slot of a key in the L1 generation tables. FNV-1a over UTF-16 code units, so JS can
-/// compute the same slot from a string with `charCodeAt` (see `l1Slot` in index.js).
-pub fn l1_slot(key: &str) -> usize {
-    let mut h: u32 = 0x811c_9dc5;
-    for unit in key.encode_utf16() {
-        h ^= unit as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    (h as usize) & (L1_GEN_SLOTS - 1)
-}
-
-#[napi(object)]
-pub struct CacheConfig {
-    pub policy: String,
-    pub capacity: u32,
-    /// Omitted: chosen from the CPU count, capped so each shard keeps a useful capacity.
-    pub shards: Option<u32>,
-    pub max_bytes: Option<f64>,
-    pub compression: Option<bool>,
-    /// Sliding expiration: every `get` hit restarts the entry's TTL window.
-    pub sliding_ttl: Option<bool>,
-}
-
-#[napi(object)]
-pub struct ShardStatsJs {
-    pub size: f64,
-    pub bytes_used: f64,
-}
-
-#[napi(object)]
-pub struct CacheStatsJs {
-    pub hits: f64,
-    pub misses: f64,
-    pub capacity: f64,
-    pub size: f64,
-    pub bytes_used: f64,
-    pub sets: f64,
-    pub deletes: f64,
-    pub evictions: f64,
-    pub expirations: f64,
-    pub hit_rate: f64,
-    pub uptime_ms: f64,
-    pub shards: Vec<ShardStatsJs>,
-}
-
-#[napi(object)]
-pub struct CacheCountersJs {
-    pub hits: f64,
-    pub misses: f64,
-    pub sets: f64,
-    pub deletes: f64,
-    pub evictions: f64,
-    pub expirations: f64,
-}
-
-/// One table of L1 generation counters, owned by a single JS `Cache` wrapper (one per
-/// thread). V8 refuses two ArrayBuffers over the same memory, so every wrapper gets its
-/// own table and writers bump the slot in all registered tables.
-struct GenTable {
-    slots: Box<[AtomicU32]>,
-}
-
-#[derive(Default)]
-struct L1Generations {
-    tables: parking_lot::RwLock<Vec<Arc<GenTable>>>,
-    count: AtomicUsize,
-}
-
-impl L1Generations {
-    #[inline]
-    fn bump(&self, key: &str) {
-        if self.count.load(Ordering::Acquire) == 0 {
-            return;
-        }
-        let slot = l1_slot(key);
-        for table in self.tables.read().iter() {
-            table.slots[slot].fetch_add(1, Ordering::Release);
-        }
-    }
-
-    fn bump_all(&self) {
-        if self.count.load(Ordering::Acquire) == 0 {
-            return;
-        }
-        for table in self.tables.read().iter() {
-            for slot in table.slots.iter() {
-                slot.fetch_add(1, Ordering::Release);
-            }
-        }
-    }
-}
-
-type Shard = parking_lot::Mutex<Option<Box<dyn CacheImpl>>>;
-
-#[napi]
-pub struct Cache {
-    shards: Arc<[Shard]>,
-    shard_mask: Option<usize>,
-    compression: bool,
-    hasher: foldhash::fast::RandomState,
-    max_bytes: Option<usize>,
-    has_ttl: Arc<AtomicBool>,
-    l1_gens: Arc<L1Generations>,
-    atomic_hits: Arc<AtomicU64>,
-    atomic_misses: Arc<AtomicU64>,
-    atomic_sets: Arc<AtomicU64>,
-    atomic_deletes: Arc<AtomicU64>,
-    atomic_evictions: Arc<AtomicU64>,
-    atomic_expirations: Arc<AtomicU64>,
-    created_at: Arc<Instant>,
-}
-
-impl Clone for Cache {
-    fn clone(&self) -> Self {
-        Self {
-            shards: Arc::clone(&self.shards),
-            shard_mask: self.shard_mask,
-            compression: self.compression,
-            hasher: self.hasher,
-            max_bytes: self.max_bytes,
-            has_ttl: Arc::clone(&self.has_ttl),
-            l1_gens: Arc::clone(&self.l1_gens),
-            atomic_hits: Arc::clone(&self.atomic_hits),
-            atomic_misses: Arc::clone(&self.atomic_misses),
-            atomic_sets: Arc::clone(&self.atomic_sets),
-            atomic_deletes: Arc::clone(&self.atomic_deletes),
-            atomic_evictions: Arc::clone(&self.atomic_evictions),
-            atomic_expirations: Arc::clone(&self.atomic_expirations),
-            created_at: Arc::clone(&self.created_at),
-        }
-    }
-}
-
 /// Default shard count: 4 per CPU (power of two, 8..=256), halved until every shard
 /// holds at least 64 entries so small caches are not split into near-empty shards.
 fn auto_shards(capacity: usize) -> usize {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut shards = (cpus * 4).next_power_of_two().clamp(8, 256);
     while shards > 1 && capacity / shards < 64 {
         shards /= 2;
@@ -159,7 +30,10 @@ fn auto_shards(capacity: usize) -> usize {
 }
 
 fn disposed_error() -> napi::Error {
-    napi::Error::new(napi::Status::GenericFailure, "Cache has been disposed or poisoned")
+    napi::Error::new(
+        napi::Status::GenericFailure,
+        "Cache has been disposed or poisoned",
+    )
 }
 
 fn ttl_from_js(ttl_ms: Option<f64>) -> Option<u64> {
@@ -184,9 +58,21 @@ impl Cache {
         let shards: Arc<[Shard]> = (0..shards_count)
             .map(|_| {
                 let inner: Box<dyn CacheImpl> = match policy_lower.as_str() {
-                    "arc" => Box::new(ArcCache::with_options(shard_capacity, shard_max_bytes, sliding)),
-                    "tinylfu" | "w-tinylfu" => Box::new(TinyLfuCache::with_options(shard_capacity, shard_max_bytes, sliding)),
-                    _ => Box::new(LruCache::with_options(shard_capacity, shard_max_bytes, sliding)),
+                    "arc" => Box::new(ArcCache::with_options(
+                        shard_capacity,
+                        shard_max_bytes,
+                        sliding,
+                    )),
+                    "tinylfu" | "w-tinylfu" => Box::new(TinyLfuCache::with_options(
+                        shard_capacity,
+                        shard_max_bytes,
+                        sliding,
+                    )),
+                    _ => Box::new(LruCache::with_options(
+                        shard_capacity,
+                        shard_max_bytes,
+                        sliding,
+                    )),
                 };
                 parking_lot::Mutex::new(Some(inner))
             })
@@ -276,11 +162,18 @@ impl Cache {
             self.atomic_evictions.fetch_add(evicted, Ordering::Relaxed);
         }
         if expired > 0 {
-            self.atomic_expirations.fetch_add(expired, Ordering::Relaxed);
+            self.atomic_expirations
+                .fetch_add(expired, Ordering::Relaxed);
         }
     }
 
-    fn eviction_object(&self, env: Env, key: &str, value: &[u8], reason: &str) -> Result<JsUnknown> {
+    fn eviction_object(
+        &self,
+        env: Env,
+        key: &str,
+        value: &[u8],
+        reason: &str,
+    ) -> Result<JsUnknown> {
         let mut ev_obj = env.create_object()?;
         ev_obj.set_named_property("key", env.create_string(key)?)?;
         ev_obj.set_named_property("value", self.deserialize_value(env, value)?)?;
@@ -294,156 +187,6 @@ impl Cache {
         obj.set_named_property("key", env.create_string(&ev.key)?)?;
         obj.set_named_property("value", self.deserialize_value(env, &ev.value)?)?;
         Ok(obj.into_unknown())
-    }
-
-    /// ========================================================================
-    /// 📂 SERIALIZATION TAG REGISTRY
-    /// ========================================================================
-    /// Every entry written off-heap is prefixed with a 1-byte protocol header
-    /// (Tag) that determines how the trailing slice payload is deserialized:
-    ///
-    ///   🏷️ CATEGORY RANGES:
-    ///     [1 - 20]   : Core payload datatypes & baseline formats
-    ///     [21 - 90]  : Reserved for future structured formats (e.g., MsgPack, Protobuf)
-    ///     [91 - 99]  : Reserved for internal testing, diagnostics, & custom overrides
-    ///
-    ///   📌 TAGS IN USE:
-    ///     Tag 1:  Raw Binary Buffer (Stored contiguously in native memory)
-    ///     Tag 2:  Raw UTF-8 String (Decoded directly into v8::String)
-    ///     Tag 3:  Raw JSON String (Raw text JSON representation of JS objects)
-    ///     Tag 4:  Atomic Counter (64-bit signed integer representation)
-    ///     Tag 5:  LZ4 Compressed JSON String (Decompressed on demand, self-describing)
-    ///     Tag 99: Test Sentinel (Reserved for diagnostic tests, do not use in production)
-    ///
-    /// The JS wrapper guarantees that a plain string never starts with "\0" (such strings
-    /// are sent JSON-encoded), so the "\0J" JSON marker below is unambiguous.
-    ///
-    /// When expanding types:
-    ///   1. Register the tag code here following the range guidelines above.
-    ///   2. Handle serialization tag routing in `serialize_value`.
-    ///   3. Implement safety catches for new tags in `deserialize_value`.
-    /// ========================================================================
-    fn serialize_value(&self, _env: Env, value: JsUnknown, force_compression: Option<bool>) -> Result<Bytes> {
-        let mut bytes = Vec::new();
-        let value_type = value.get_type()?;
-
-        if value.is_buffer()? {
-            let buf = JsBuffer::try_from(value)?;
-            let data = buf.into_value()?;
-            bytes.reserve_exact(1 + data.len());
-            bytes.push(1); // Tag: Buffer
-            bytes.extend_from_slice(&data);
-        } else if value_type == ValueType::String {
-            let js_str = JsString::try_from(value)?;
-            let utf8 = js_str.into_utf8()?;
-            let slice = utf8.as_slice();
-            if slice.starts_with(b"\0J") {
-                let compress = force_compression.unwrap_or(self.compression);
-                if compress {
-                    bytes.push(5); // Tag: Compressed JSON
-                    let compressed = lz4_flex::compress_prepend_size(&slice[2..]);
-                    bytes.extend_from_slice(&compressed);
-                } else {
-                    bytes.reserve_exact(slice.len() - 1);
-                    bytes.push(3); // Tag: JSON (Raw)
-                    bytes.extend_from_slice(&slice[2..]);
-                }
-            } else {
-                bytes.reserve_exact(1 + slice.len());
-                bytes.push(2); // Tag: String
-                bytes.extend_from_slice(slice);
-            }
-        } else if value_type == ValueType::Number {
-            let num = value.coerce_to_number()?;
-            let val = num.get_double()?;
-            if val.fract() == 0.0 && val >= (i64::MIN as f64) && val <= (i64::MAX as f64) {
-                bytes.push(4); // Tag: i64
-                bytes.extend_from_slice(&(val as i64).to_ne_bytes());
-            } else {
-                let s = val.to_string();
-                let compress = force_compression.unwrap_or(self.compression);
-                if compress {
-                    bytes.push(5); // Tag: Compressed JSON
-                    let compressed = lz4_flex::compress_prepend_size(s.as_bytes());
-                    bytes.extend_from_slice(&compressed);
-                } else {
-                    bytes.push(3); // Tag: JSON (Raw)
-                    bytes.extend_from_slice(s.as_bytes());
-                }
-            }
-        } else {
-            return Err(napi::Error::new(napi::Status::InvalidArg, "Complex types must be serialized to JSON in JS wrapper"));
-        }
-        Ok(Bytes::from(bytes))
-    }
-
-    fn deserialize_value(&self, env: Env, bytes: &[u8]) -> Result<JsUnknown> {
-        if bytes.is_empty() {
-            return Ok(env.get_undefined()?.into_unknown());
-        }
-        let tag = bytes[0];
-        let payload = &bytes[1..];
-        match tag {
-            1 => {
-                let js_buf = env.create_buffer_copy(payload)?;
-                Ok(js_buf.into_unknown())
-            }
-            2 => {
-                let s = std::str::from_utf8(payload)
-                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
-                let js_str = env.create_string(s)?;
-                Ok(js_str.into_unknown())
-            }
-            3 => {
-                let s = std::str::from_utf8(payload)
-                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
-                let mut prefixed = String::with_capacity(2 + s.len());
-                prefixed.push('\0');
-                prefixed.push('J');
-                prefixed.push_str(s);
-                let js_str = env.create_string(&prefixed)?;
-                Ok(js_str.into_unknown())
-            }
-            4 => {
-                if payload.len() == 8 {
-                    let val = i64::from_ne_bytes(payload.try_into().unwrap());
-                    let js_num = env.create_double(val as f64)?;
-                    Ok(js_num.into_unknown())
-                } else {
-                    Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted"))
-                }
-            }
-            5 => {
-                if payload.len() < 4 {
-                    return Err(napi::Error::new(napi::Status::InvalidArg, "Compressed payload is too short"));
-                }
-                let uncompressed_size = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-
-                // Enforce safety limit of min(32 MB, max_bytes * 0.1) to prevent decompression bombs and OOM allocation panics
-                let mut limit = 32 * 1024 * 1024;
-                if let Some(mb) = self.max_bytes {
-                    limit = limit.min((mb as f64 * 0.1) as usize).max(1024);
-                }
-                if uncompressed_size > limit {
-                    return Err(napi::Error::new(
-                        napi::Status::InvalidArg,
-                        format!("Decompressed size {} exceeds safety limit of {} bytes", uncompressed_size, limit)
-                    ));
-                }
-
-                // Decompress straight after the "\0J" marker to avoid a second copy.
-                let mut prefixed = vec![0u8; 2 + uncompressed_size];
-                prefixed[1] = b'J';
-                lz4_flex::block::decompress_into(&payload[4..], &mut prefixed[2..])
-                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("LZ4 Decompression failed: {}", e)))?;
-
-                let s = std::str::from_utf8(&prefixed)
-                    .map_err(|e| napi::Error::new(napi::Status::StringExpected, e.to_string()))?;
-                let js_str = env.create_string(s)?;
-                Ok(js_str.into_unknown())
-            }
-            _ => Err(napi::Error::new(napi::Status::InvalidArg, "Invalid data type tag in cache storage")),
-        }
     }
 
     /// Wraps a hit as `[value, remainingTtlMs]` when the entry has a TTL, so the JS
@@ -467,7 +210,11 @@ impl Cache {
         let hash = self.hash_key(&key);
         let (bytes, eviction, ttl) = self.with_shard(self.shard_for(hash), |cache| {
             let (bytes, eviction) = cache.get(hash, &key);
-            let ttl = if with_ttl && bytes.is_some() { cache.ttl_remaining_ms(hash, &key) } else { None };
+            let ttl = if with_ttl && bytes.is_some() {
+                cache.ttl_remaining_ms(hash, &key)
+            } else {
+                None
+            };
             (bytes, eviction, ttl)
         })?;
 
@@ -497,13 +244,18 @@ impl Cache {
             // The shard is released before any fallible JS conversion below.
             let (bytes, eviction, ttl) = self.with_shard(self.shard_for(hash), |cache| {
                 let (bytes, eviction) = cache.get(hash, &key);
-                let ttl = if with_ttl && bytes.is_some() { cache.ttl_remaining_ms(hash, &key) } else { None };
+                let ttl = if with_ttl && bytes.is_some() {
+                    cache.ttl_remaining_ms(hash, &key)
+                } else {
+                    None
+                };
                 (bytes, eviction, ttl)
             })?;
 
             let val_res = if let Some(b) = bytes {
                 hits += 1;
-                self.deserialize_value(env, &b).and_then(|v| self.wrap_with_ttl(env, v, ttl))
+                self.deserialize_value(env, &b)
+                    .and_then(|v| self.wrap_with_ttl(env, v, ttl))
             } else if let Some(ev) = eviction {
                 misses += 1;
                 expirations += 1;
@@ -522,7 +274,8 @@ impl Cache {
             self.atomic_misses.fetch_add(misses, Ordering::Relaxed);
         }
         if expirations > 0 {
-            self.atomic_expirations.fetch_add(expirations, Ordering::Relaxed);
+            self.atomic_expirations
+                .fetch_add(expirations, Ordering::Relaxed);
         }
 
         Ok(result)
@@ -552,7 +305,10 @@ impl Cache {
 
 fn validate_key(key: &str) -> Result<()> {
     if key.len() > 8192 {
-        return Err(napi::Error::new(napi::Status::InvalidArg, "Key length exceeds safety limit of 8192 bytes"));
+        return Err(napi::Error::new(
+            napi::Status::InvalidArg,
+            "Key length exceeds safety limit of 8192 bytes",
+        ));
     }
     Ok(())
 }
@@ -574,25 +330,42 @@ impl Cache {
     pub fn peek(&self, env: Env, key: String) -> Result<JsUnknown> {
         validate_key(&key)?;
         let hash = self.hash_key(&key);
-        let (bytes, eviction) = self.with_shard(self.shard_for(hash), |cache| cache.peek(hash, &key))?;
+        let (bytes, eviction) =
+            self.with_shard(self.shard_for(hash), |cache| cache.peek(hash, &key))?;
         let found = match bytes {
             Some(b) => Some(self.deserialize_value(env, &b)?),
             None => None,
         };
-        self.lookup_result(env, found, eviction, || Ok(env.get_undefined()?.into_unknown()))
+        self.lookup_result(env, found, eviction, || {
+            Ok(env.get_undefined()?.into_unknown())
+        })
     }
 
     #[napi(catch_unwind)]
     pub fn has(&self, env: Env, key: String) -> Result<JsUnknown> {
         validate_key(&key)?;
         let hash = self.hash_key(&key);
-        let (has_key, eviction) = self.with_shard(self.shard_for(hash), |cache| cache.has(hash, &key))?;
-        let found = if has_key { Some(env.get_boolean(true)?.into_unknown()) } else { None };
-        self.lookup_result(env, found, eviction, || Ok(env.get_boolean(false)?.into_unknown()))
+        let (has_key, eviction) =
+            self.with_shard(self.shard_for(hash), |cache| cache.has(hash, &key))?;
+        let found = if has_key {
+            Some(env.get_boolean(true)?.into_unknown())
+        } else {
+            None
+        };
+        self.lookup_result(env, found, eviction, || {
+            Ok(env.get_boolean(false)?.into_unknown())
+        })
     }
 
     #[napi(catch_unwind)]
-    pub fn set(&self, env: Env, key: String, value: JsUnknown, ttl_ms: Option<f64>, force_compression: Option<bool>) -> Result<JsUnknown> {
+    pub fn set(
+        &self,
+        env: Env,
+        key: String,
+        value: JsUnknown,
+        ttl_ms: Option<f64>,
+        force_compression: Option<bool>,
+    ) -> Result<JsUnknown> {
         validate_key(&key)?;
         let bytes = self.serialize_value(env, value, force_compression)?;
         let ttl = ttl_from_js(ttl_ms);
@@ -634,10 +407,17 @@ impl Cache {
         let ttl = ttl_from_js(ttl_ms);
         self.note_ttl(ttl);
         let hash = self.hash_key(&key);
-        let (res, eviction) = self.with_shard(self.shard_for(hash), |cache| cache.touch(hash, &key, ttl))?;
+        let (res, eviction) =
+            self.with_shard(self.shard_for(hash), |cache| cache.touch(hash, &key, ttl))?;
         self.l1_gens.bump(&key);
-        let found = if res { Some(env.get_boolean(true)?.into_unknown()) } else { None };
-        self.lookup_result(env, found, eviction, || Ok(env.get_boolean(false)?.into_unknown()))
+        let found = if res {
+            Some(env.get_boolean(true)?.into_unknown())
+        } else {
+            None
+        };
+        self.lookup_result(env, found, eviction, || {
+            Ok(env.get_boolean(false)?.into_unknown())
+        })
     }
 
     #[napi(catch_unwind)]
@@ -665,21 +445,30 @@ impl Cache {
     /// (default: all of them). Returns the expired entries as eviction objects when
     /// `collect` is true (for `onExpire` hooks), otherwise just their count.
     #[napi(catch_unwind)]
-    pub fn purge_expired(&self, env: Env, max_scan_per_shard: Option<u32>, collect: Option<bool>) -> Result<JsUnknown> {
+    pub fn purge_expired(
+        &self,
+        env: Env,
+        max_scan_per_shard: Option<u32>,
+        collect: Option<bool>,
+    ) -> Result<JsUnknown> {
         let max_scan = max_scan_per_shard.map_or(usize::MAX, |n| n as usize);
         let mut expired = Vec::new();
         for shard in self.shards.iter() {
             self.with_shard(shard, |cache| cache.purge_expired(max_scan, &mut expired))?;
         }
         if !expired.is_empty() {
-            self.atomic_expirations.fetch_add(expired.len() as u64, Ordering::Relaxed);
+            self.atomic_expirations
+                .fetch_add(expired.len() as u64, Ordering::Relaxed);
         }
         if !collect.unwrap_or(false) {
             return Ok(env.create_uint32(expired.len() as u32)?.into_unknown());
         }
         let mut js_arr = env.create_array_with_length(expired.len())?;
         for (i, ev) in expired.iter().enumerate() {
-            js_arr.set_element(i as u32, self.eviction_object(env, &ev.key, &ev.value, ev.reason)?)?;
+            js_arr.set_element(
+                i as u32,
+                self.eviction_object(env, &ev.key, &ev.value, ev.reason)?,
+            )?;
         }
         Ok(js_arr.into_unknown())
     }
@@ -727,7 +516,11 @@ impl Cache {
         let expirations = self.atomic_expirations.load(Ordering::Relaxed);
 
         let total = hits + misses;
-        let hit_rate = if total > 0 { hits as f64 / total as f64 } else { 0.0 };
+        let hit_rate = if total > 0 {
+            hits as f64 / total as f64
+        } else {
+            0.0
+        };
 
         let mut total_capacity = 0.0;
         let mut total_size = 0.0;
@@ -800,7 +593,13 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn increment(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
+    pub fn increment(
+        &self,
+        env: Env,
+        key: String,
+        delta: i64,
+        ttl_ms: Option<f64>,
+    ) -> Result<JsUnknown> {
         validate_key(&key)?;
         let ttl = ttl_from_js(ttl_ms);
         self.note_ttl(ttl);
@@ -815,29 +614,53 @@ impl Cache {
                     let tag = bytes[0];
                     let payload = &bytes[1..];
                     match tag {
-                        4 => {
+                        TAG_I64 => {
                             if payload.len() == 8 {
-                                current_val = i64::from_ne_bytes(payload.try_into().unwrap());
+                                current_val = i64::from_le_bytes(payload.try_into().unwrap());
                             } else {
-                                return (is_hit, Err(napi::Error::new(napi::Status::InvalidArg, "Counter value is corrupted")));
+                                return (
+                                    is_hit,
+                                    Err(napi::Error::new(
+                                        napi::Status::InvalidArg,
+                                        "Counter value is corrupted",
+                                    )),
+                                );
                             }
                         }
-                        3 => {
-                            let parsed = std::str::from_utf8(payload).ok().and_then(|s| s.parse::<i64>().ok());
+                        TAG_JSON => {
+                            let parsed = std::str::from_utf8(payload)
+                                .ok()
+                                .and_then(|s| s.parse::<i64>().ok());
                             match parsed {
                                 Some(val) => current_val = val,
-                                None => return (is_hit, Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a valid 64-bit integer"))),
+                                None => {
+                                    return (
+                                        is_hit,
+                                        Err(napi::Error::new(
+                                            napi::Status::InvalidArg,
+                                            "Value is not a valid 64-bit integer",
+                                        )),
+                                    )
+                                }
                             }
                         }
-                        _ => return (is_hit, Err(napi::Error::new(napi::Status::InvalidArg, "Value is not a numeric counter"))),
+                        _ => {
+                            return (
+                                is_hit,
+                                Err(napi::Error::new(
+                                    napi::Status::InvalidArg,
+                                    "Value is not a numeric counter",
+                                )),
+                            )
+                        }
                     }
                 }
             }
 
             let new_val = current_val.wrapping_add(delta);
             let mut new_bytes = Vec::with_capacity(9);
-            new_bytes.push(4); // Tag 4: i64
-            new_bytes.extend_from_slice(&new_val.to_ne_bytes());
+            new_bytes.push(TAG_I64);
+            new_bytes.extend_from_slice(&new_val.to_le_bytes());
             let _ = cache.set(hash, &key, Bytes::from(new_bytes), ttl);
             (is_hit, Ok(new_val))
         })?;
@@ -854,7 +677,13 @@ impl Cache {
     }
 
     #[napi(catch_unwind)]
-    pub fn decrement(&self, env: Env, key: String, delta: i64, ttl_ms: Option<f64>) -> Result<JsUnknown> {
+    pub fn decrement(
+        &self,
+        env: Env,
+        key: String,
+        delta: i64,
+        ttl_ms: Option<f64>,
+    ) -> Result<JsUnknown> {
         self.increment(env, key, -delta, ttl_ms)
     }
 
@@ -926,14 +755,16 @@ impl Cache {
         for key in keys {
             validate_key(&key)?;
             let hash = self.hash_key(&key);
-            let deleted = self.with_shard(self.shard_for(hash), |cache| cache.delete(hash, &key))?;
+            let deleted =
+                self.with_shard(self.shard_for(hash), |cache| cache.delete(hash, &key))?;
             self.l1_gens.bump(&key);
             if deleted {
                 count += 1;
             }
         }
         if count > 0 {
-            self.atomic_deletes.fetch_add(count as u64, Ordering::Relaxed);
+            self.atomic_deletes
+                .fetch_add(count as u64, Ordering::Relaxed);
         }
         Ok(count)
     }
@@ -954,7 +785,9 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
+    use super::serde::{TAG_BUFFER, TAG_LZ4_JSON, TAG_STRING};
     use super::*;
+    use crate::algorithms::test_hash;
 
     #[test]
     fn l1_slot_matches_js_fnv1a_over_utf16() {
@@ -977,5 +810,291 @@ mod tests {
         assert_eq!(auto_shards(10), 1);
         assert!(10_000 / auto_shards(10_000) >= 64);
         assert!(auto_shards(10_000_000).is_power_of_two());
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    fn encode_i64(val: i64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9);
+        bytes.push(TAG_I64);
+        bytes.extend_from_slice(&val.to_le_bytes());
+        bytes
+    }
+
+    fn encode_string(s: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + s.len());
+        bytes.push(TAG_STRING);
+        bytes.extend_from_slice(s.as_bytes());
+        bytes
+    }
+
+    fn encode_json(json: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + json.len());
+        bytes.push(TAG_JSON);
+        bytes.extend_from_slice(json.as_bytes());
+        bytes
+    }
+
+    fn encode_buffer(data: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + data.len());
+        bytes.push(TAG_BUFFER);
+        bytes.extend_from_slice(data);
+        bytes
+    }
+
+    // ── TAG constants ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tag_constants_are_unique_and_nonzero() {
+        let tags = [TAG_BUFFER, TAG_STRING, TAG_JSON, TAG_I64, TAG_LZ4_JSON];
+        for &t in &tags {
+            assert_ne!(t, 0, "Tag {t} must not be zero");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for &t in &tags {
+            assert!(seen.insert(t), "Duplicate tag value: {t}");
+        }
+    }
+
+    // ── Serialization encoding ────────────────────────────────────────────────
+
+    #[test]
+    fn encode_i64_uses_little_endian() {
+        let encoded = encode_i64(1);
+        assert_eq!(encoded[0], TAG_I64);
+        assert_eq!(&encoded[1..], &[1u8, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn encode_i64_negative_value() {
+        let val: i64 = -1;
+        let encoded = encode_i64(val);
+        assert_eq!(encoded[0], TAG_I64);
+        let recovered = i64::from_le_bytes(encoded[1..].try_into().unwrap());
+        assert_eq!(recovered, val);
+    }
+
+    #[test]
+    fn encode_i64_min_max_roundtrip() {
+        for val in [i64::MIN, i64::MAX, 0i64, 42, -42] {
+            let encoded = encode_i64(val);
+            let recovered = i64::from_le_bytes(encoded[1..].try_into().unwrap());
+            assert_eq!(recovered, val, "Roundtrip failed for {val}");
+        }
+    }
+
+    #[test]
+    fn encode_string_tag_and_content() {
+        let s = "hello";
+        let encoded = encode_string(s);
+        assert_eq!(encoded[0], TAG_STRING);
+        assert_eq!(&encoded[1..], s.as_bytes());
+    }
+
+    #[test]
+    fn encode_json_tag_and_content() {
+        let json = r#"{"x":1}"#;
+        let encoded = encode_json(json);
+        assert_eq!(encoded[0], TAG_JSON);
+        assert_eq!(&encoded[1..], json.as_bytes());
+    }
+
+    #[test]
+    fn encode_buffer_tag_and_bytes() {
+        let data: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let encoded = encode_buffer(data);
+        assert_eq!(encoded[0], TAG_BUFFER);
+        assert_eq!(&encoded[1..], data);
+    }
+
+    // ── Deserialization decoding (pure byte parsing, no NAPI) ─────────────────
+
+    #[test]
+    fn decode_i64_little_endian_correctness() {
+        let raw: [u8; 8] = 42i64.to_le_bytes();
+        let decoded = i64::from_le_bytes(raw);
+        assert_eq!(decoded, 42);
+    }
+
+    #[test]
+    fn decode_i64_endianness_stability() {
+        let encoded = encode_i64(256);
+        assert_eq!(encoded[1], 0x00, "byte 0 of 256");
+        assert_eq!(encoded[2], 0x01, "byte 1 of 256");
+        for &b in &encoded[3..] {
+            assert_eq!(b, 0x00);
+        }
+    }
+
+    #[test]
+    fn invalid_tag_zero_is_unrecognized() {
+        let unknown_tag: u8 = 0;
+        assert_ne!(unknown_tag, TAG_BUFFER);
+        assert_ne!(unknown_tag, TAG_STRING);
+        assert_ne!(unknown_tag, TAG_JSON);
+        assert_ne!(unknown_tag, TAG_I64);
+        assert_ne!(unknown_tag, TAG_LZ4_JSON);
+    }
+
+    #[test]
+    fn lz4_decompression_size_prefix_is_four_bytes_le() {
+        let original = b"hello world from offheap";
+        let compressed = lz4_flex::compress_prepend_size(original);
+        let size_bytes: [u8; 4] = compressed[0..4].try_into().unwrap();
+        let decoded_size = u32::from_le_bytes(size_bytes) as usize;
+        assert_eq!(decoded_size, original.len());
+    }
+
+    // ── validate_key ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_key_accepts_normal_keys() {
+        assert!(validate_key("hello").is_ok());
+        assert!(validate_key("").is_ok());
+        assert!(validate_key("unicode_日本語").is_ok());
+    }
+
+    #[test]
+    fn validate_key_rejects_oversized_key() {
+        let long_key = "a".repeat(8193);
+        let result = validate_key(&long_key);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.reason.contains("8192"),
+            "Error message must mention the limit"
+        );
+    }
+
+    #[test]
+    fn validate_key_accepts_exactly_8192_bytes() {
+        let max_key = "a".repeat(8192);
+        assert!(validate_key(&max_key).is_ok());
+    }
+
+    // ── LruCache via CacheImpl (integration without NAPI) ────────────────────
+
+    #[test]
+    fn lru_set_and_get_roundtrip() {
+        let mut cache = LruCache::new(10);
+        let value = encode_string("test_value");
+        cache.set(test_hash("key1"), "key1", Bytes::from(value.clone()), None);
+        let (result, eviction) = cache.get(test_hash("key1"), "key1");
+        assert!(eviction.is_none());
+        assert_eq!(result.unwrap(), value);
+    }
+
+    #[test]
+    fn lru_evicts_lru_on_capacity_exceeded() {
+        let mut cache = LruCache::new(2);
+        cache.set(test_hash("a"), "a", Bytes::from(encode_string("v_a")), None);
+        cache.set(test_hash("b"), "b", Bytes::from(encode_string("v_b")), None);
+        cache.get(test_hash("a"), "a");
+        cache.set(test_hash("c"), "c", Bytes::from(encode_string("v_c")), None);
+        let (b_val, _) = cache.get(test_hash("b"), "b");
+        assert!(b_val.is_none(), "b should have been evicted");
+        let (a_val, _) = cache.get(test_hash("a"), "a");
+        assert!(a_val.is_some(), "a should still be in cache");
+    }
+
+    #[test]
+    fn lru_delete_removes_key() {
+        let mut cache = LruCache::new(5);
+        cache.set(test_hash("key"), "key", Bytes::from(encode_i64(100)), None);
+        assert!(cache.delete(test_hash("key"), "key"));
+        assert!(!cache.delete(test_hash("key"), "key"));
+        let (val, _) = cache.get(test_hash("key"), "key");
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn lru_ttl_expiry_returns_eviction() {
+        let mut cache = LruCache::new(5);
+        cache.set(
+            test_hash("temp"),
+            "temp",
+            Bytes::from(encode_string("value")),
+            Some(1),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (val, eviction) = cache.get(test_hash("temp"), "temp");
+        assert!(val.is_none(), "expired key must not return a value");
+        assert!(
+            eviction.is_some(),
+            "expired key must return an eviction record"
+        );
+        let ev = eviction.unwrap();
+        assert_eq!(ev.key, "temp");
+        assert_eq!(ev.reason, "expired");
+    }
+
+    #[test]
+    fn lru_peek_does_not_promote_key() {
+        let mut cache = LruCache::new(2);
+        cache.set(test_hash("a"), "a", Bytes::from(encode_string("v_a")), None);
+        cache.set(test_hash("b"), "b", Bytes::from(encode_string("v_b")), None);
+        let (peeked, _) = cache.peek(test_hash("a"), "a");
+        assert!(peeked.is_some());
+        cache.set(test_hash("c"), "c", Bytes::from(encode_string("v_c")), None);
+        let (a_val, _) = cache.get(test_hash("a"), "a");
+        assert!(a_val.is_none(), "peek must not prevent eviction of a");
+    }
+
+    #[test]
+    fn lru_clear_empties_cache() {
+        let mut cache = LruCache::new(5);
+        for i in 0..5 {
+            cache.set(
+                test_hash(&format!("k{i}")),
+                &format!("k{i}"),
+                Bytes::from(encode_i64(i as i64)),
+                None,
+            );
+        }
+        assert_eq!(cache.stats().size, 5);
+        cache.clear();
+        assert_eq!(cache.stats().size, 0);
+        let (val, _) = cache.get(test_hash("k0"), "k0");
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn lru_max_bytes_triggers_eviction() {
+        let mut cache = LruCache::new_with_max_bytes(100, Some(5));
+        cache.set(test_hash("a"), "a", Bytes::from(encode_string("v")), None);
+        cache.set(test_hash("b"), "b", Bytes::from(encode_string("v")), None);
+        cache.set(test_hash("c"), "c", Bytes::from(encode_string("v")), None);
+        let stats = cache.stats();
+        assert!(
+            stats.bytes_used <= 5,
+            "bytes_used {} must not exceed maxBytes 5",
+            stats.bytes_used
+        );
+    }
+
+    // ── Counter increment/decrement encoding ──────────────────────────────────
+
+    #[test]
+    fn i64_counter_encoding_survives_lru_roundtrip() {
+        let mut cache = LruCache::new(5);
+        let initial: i64 = 0;
+        let delta: i64 = 7;
+        let new_val = initial + delta;
+
+        let encoded = encode_i64(new_val);
+        cache.set(test_hash("counter"), "counter", Bytes::from(encoded), None);
+
+        let (bytes, _) = cache.get(test_hash("counter"), "counter");
+        let bytes = bytes.expect("counter must exist");
+        assert_eq!(bytes[0], TAG_I64, "tag must be TAG_I64");
+        let recovered = i64::from_le_bytes(bytes[1..].try_into().unwrap());
+        assert_eq!(recovered, 7);
+    }
+
+    #[test]
+    fn i64_counter_negative_encoding() {
+        let val: i64 = -999;
+        let encoded = encode_i64(val);
+        let recovered = i64::from_le_bytes(encoded[1..].try_into().unwrap());
+        assert_eq!(recovered, val);
     }
 }
